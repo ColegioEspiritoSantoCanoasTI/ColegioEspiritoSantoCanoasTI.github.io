@@ -1,0 +1,6447 @@
+const { useState, useEffect, useRef, useMemo } = React;
+
+// ---------- Local storage shim (mesma interface usada no app original) ----------
+
+const storage = {
+  get: async (key) => {
+    try {
+      const v = localStorage.getItem(key);
+      return v ? { value: v } : null;
+    } catch (e) {
+      return null;
+    }
+  },
+  set: async (key, value) => {
+    localStorage.setItem(key, value);
+    return {};
+  },
+};
+
+// ---------- Ícones simples em SVG (substituem lucide-react) ----------
+
+const ICON_PATHS = {
+  dashboard: "M4 4h6v8H4V4zm10 0h6v5h-6V4zM4 14h6v6H4v-6zm10 3h6v3h-6v-3z",
+  boxes: "M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3zm0 2.3L6 8.5v7L12 18.7l6-3.2v-7L12 5.3zM12 12l6-3.3M12 12v9M12 12L6 8.7",
+  tag: "M20 12l-8 8-9-9V4h7l10 8zM7 7.01L7.01 7",
+  door: "M6 3h9v18H6V3zm9 4h3v14h-3M9 12v.01",
+  users: "M8 11a3 3 0 100-6 3 3 0 000 6zm8 0a3 3 0 100-6 3 3 0 000 6zM2 20c0-3 3-5 6-5s6 2 6 5m2-5c2.5 0 5 2 5 5",
+  filebar: "M6 3h9l4 4v14H6V3zm3 12v3m4-6v6m4-3v3",
+  upload: "M12 16V4m0 0L7 9m5-5l5 5M5 20h14",
+  plus: "M12 5v14M5 12h14",
+  pencil: "M4 20l4-1 11-11-3-3L5 16l-1 4zM14 4l3 3",
+  trash: "M4 7h16M9 7V4h6v3m-8 0l1 13h8l1-13",
+  search: "M11 4a7 7 0 100 14 7 7 0 000-14zm10 17l-5.5-5.5",
+  x: "M5 5l14 14M19 5L5 19",
+  download: "M12 4v12m0 0l-5-5m5 5l5-5M4 20h16",
+  alert: "M12 3l10 18H2L12 3zm0 6v5m0 3h.01",
+  check: "M4 12l6 6L20 6",
+  chevronLeft: "M15 5l-7 7 7 7",
+  chevronRight: "M9 5l7 7-7 7",
+  filesheet: "M6 3h9l4 4v14H6V3zm0 8h13m-13 4h13m-13 4h13M12 7v14",
+  message: "M4 4h16v12H8l-4 4V4z",
+  send: "M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z",
+  menu: "M3 6h18M3 12h18M3 18h18",
+  qrcode: "M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm14 0h2v2h-2zm-4 0h2v2h-2zm4 4h2v2h-2zm-4 0h2v2h-2z",
+  pin: "M12 17v5m-5-9h10l-1.5-2V5a3.5 3.5 0 00-7 0v6L7 13z",
+  clock: "M12 21a9 9 0 100-18 9 9 0 000 18zm0-14v5l3.5 2",
+};
+
+function Icon({ name, size = 16, ...rest }) {
+  const d = ICON_PATHS[name] || "";
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" {...rest}>
+      <path d={d} />
+    </svg>
+  );
+}
+
+const IconWrap = (name) => (props) => <Icon name={name} {...props} />;
+
+const LayoutDashboard = IconWrap("dashboard");
+const Boxes = IconWrap("boxes");
+const Tag = IconWrap("tag");
+const DoorOpen = IconWrap("door");
+const Users = IconWrap("users");
+const FileBarChart = IconWrap("filebar");
+const Upload = IconWrap("upload");
+const Plus = IconWrap("plus");
+const Pencil = IconWrap("pencil");
+const Trash2 = IconWrap("trash");
+const Search = IconWrap("search");
+const X = IconWrap("x");
+const Download = IconWrap("download");
+const TriangleAlert = IconWrap("alert");
+const Check = IconWrap("check");
+const ChevronLeft = IconWrap("chevronLeft");
+const ChevronRight = IconWrap("chevronRight");
+const FileSpreadsheet = IconWrap("filesheet");
+const MessageSquare = IconWrap("message");
+const Send = IconWrap("send");
+const Menu = IconWrap("menu");
+const QrCode = IconWrap("qrcode");
+const Pin = IconWrap("pin");
+const Clock = IconWrap("clock");
+
+const TIPO_AREA_EMOJI = {
+  "Sala de aula": "🎓",
+  "Laboratório": "🧪",
+  "Biblioteca": "📚",
+  "Administrativo": "🗄️",
+  Outro: "➕",
+  "Informática": "💻",
+  "Laboratório de Informática": "💻",
+};
+
+// ---------- Gráficos com Chart.js (substituem recharts) ----------
+
+// Desenha o valor de cada barra escrito do lado dela — sem isso o número só
+// aparecia passando o mouse (tooltip do Chart.js), o que não funciona em
+// print nem no celular.
+const valueLabelsPlugin = {
+  id: "valueLabels",
+  afterDatasetsDraw(chart) {
+    const { ctx } = chart;
+    chart.data.datasets.forEach((ds, i) => {
+      chart.getDatasetMeta(i).data.forEach((bar, idx) => {
+        ctx.save();
+        ctx.fillStyle = "#16233D";
+        ctx.font = "700 11px ui-sans-serif, system-ui, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(ds.data[idx], bar.x + 6, bar.y);
+        ctx.restore();
+      });
+    });
+  },
+};
+
+function BarChartHorizontal({ data, color = "#C97A2B" }) {
+  const canvasRef = useRef(null);
+  const chartRef = useRef(null);
+
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    if (chartRef.current) chartRef.current.destroy();
+    const ctx = canvasRef.current.getContext("2d");
+    chartRef.current = new Chart(ctx, {
+      type: "bar",
+      data: {
+        labels: data.map((d) => d.name),
+        datasets: [{ data: data.map((d) => d.value), backgroundColor: color, borderRadius: 3 }],
+      },
+      options: {
+        indexAxis: "y",
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: { padding: { right: 34 } },
+        plugins: { legend: { display: false }, tooltip: { enabled: true } },
+        scales: {
+          x: { beginAtZero: true, ticks: { precision: 0, font: { size: 11 } }, grid: { color: "#E1DDD0" } },
+          y: { ticks: { font: { size: 11 } }, grid: { display: false } },
+        },
+      },
+      plugins: [valueLabelsPlugin],
+    });
+    return () => {
+      if (chartRef.current) chartRef.current.destroy();
+    };
+  }, [JSON.stringify(data), color]);
+
+  return (
+    <div style={{ position: "relative", height: Math.max(280, data.length * 24) }}>
+      <canvas ref={canvasRef}></canvas>
+    </div>
+  );
+}
+
+function DonutChart({ data, colors }) {
+  const canvasRef = useRef(null);
+  const chartRef = useRef(null);
+
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    if (chartRef.current) chartRef.current.destroy();
+    const ctx = canvasRef.current.getContext("2d");
+    chartRef.current = new Chart(ctx, {
+      type: "doughnut",
+      data: {
+        labels: data.map((d) => d.name),
+        datasets: [{ data: data.map((d) => d.value), backgroundColor: data.map((d) => colors[d.name] || "#999"), borderWidth: 2, borderColor: "#fff" }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        cutout: "62%",
+      },
+    });
+    return () => {
+      if (chartRef.current) chartRef.current.destroy();
+    };
+  }, [JSON.stringify(data)]);
+
+  return (
+    <div style={{ position: "relative", height: 300 }}>
+      <canvas ref={canvasRef}></canvas>
+    </div>
+  );
+}
+const BACKEND_URL = "https://script.google.com/macros/s/AKfycbzGvIBQli7lFcWTfnJwmtp4cBneZZCuU9IPRqoe3Xt3PQX-my9Olbwadz_-F5pWf0-N/exec";
+
+let __jsonpCounter = 0;
+function jsonpRequest(url) {
+  return new Promise((resolve, reject) => {
+    const callbackName = "__jsonp_cb_" + __jsonpCounter++ + "_" + Date.now();
+    const script = document.createElement("script");
+    let settled = false;
+    let timer;
+    const cleanup = () => {
+      delete window[callbackName];
+      if (script.parentNode) script.parentNode.removeChild(script);
+      clearTimeout(timer);
+    };
+    window[callbackName] = (data) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(data);
+    };
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("Tempo esgotado ao conectar no backend (tente novamente, ou verifique sua conexão)."));
+    }, 25000);
+    script.onerror = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("Falha ao carregar resposta do backend (verifique a URL configurada)."));
+    };
+    const sep = url.indexOf("?") === -1 ? "?" : "&";
+    script.src = url + sep + "callback=" + callbackName;
+    document.head.appendChild(script);
+  });
+}
+
+// O backend (Google Apps Script) às vezes tem lentidão/instabilidade
+// passageira (comum em implantações novas, enquanto o Google "esquenta" o
+// serviço). Uma nova tentativa automática evita mostrar erro pro usuário
+// por causa de uma falha isolada e momentânea.
+async function jsonpRequestComRetry(url) {
+  try {
+    return await jsonpRequest(url);
+  } catch (e) {
+    await new Promise((r) => setTimeout(r, 1000));
+    return jsonpRequest(url);
+  }
+}
+
+async function backendGet(secret, adminNome) {
+  const params = [];
+  if (secret) params.push("secret=" + encodeURIComponent(secret));
+  if (adminNome) params.push("adminNome=" + encodeURIComponent(adminNome));
+  const url = BACKEND_URL + (params.length ? "?" + params.join("&") : "");
+  return jsonpRequestComRetry(url);
+}
+
+async function backendGetUser(nome, senha) {
+  const url = BACKEND_URL + "?userNome=" + encodeURIComponent(nome) + "&userSenha=" + encodeURIComponent(senha || "");
+  return jsonpRequestComRetry(url);
+}
+
+// Login único da tela pública: manda os mesmos nome+senha tanto como
+// possível admin (secret=senha, adminNome=nome) quanto como possível
+// solicitante/autorizado (userNome=nome, userSenha=senha) na MESMA
+// requisição — o backend já tenta admin primeiro e só cai pro outro
+// caminho se não bater (ver doGet), então isso resolve os dois casos sem
+// precisar de uma tela ou botão separado pra "acesso administrativo".
+async function backendLoginUnificado(nome, senha) {
+  const url =
+    BACKEND_URL +
+    "?secret=" + encodeURIComponent(senha) +
+    "&adminNome=" + encodeURIComponent(nome) +
+    "&userNome=" + encodeURIComponent(nome) +
+    "&userSenha=" + encodeURIComponent(senha);
+  return jsonpRequestComRetry(url);
+}
+
+// Cadastro público (nome + email + senha escolhida pela própria pessoa).
+// Vai por GET/JSONP (não por backendPost) porque precisa de uma resposta de
+// verdade pra saber se o email já existe ou não — backendPost usa fetch em
+// modo no-cors (pra evitar CORS do Apps Script) e nunca consegue ler o que o
+// servidor respondeu, só se a requisição saiu.
+async function backendCadastro(nome, email, senha) {
+  const url =
+    BACKEND_URL +
+    "?action=cadastro&novoNome=" +
+    encodeURIComponent(nome) +
+    "&novoEmail=" +
+    encodeURIComponent(email) +
+    "&novoSenha=" +
+    encodeURIComponent(senha || "");
+  return jsonpRequestComRetry(url);
+}
+
+async function backendPost(action, payload) {
+  const tentar = () =>
+    fetch(BACKEND_URL, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action, ...(payload || {}) }),
+    });
+  try {
+    try {
+      await tentar();
+    } catch (e) {
+      // Instabilidade passageira do backend: tenta uma vez mais antes de desistir.
+      await new Promise((r) => setTimeout(r, 1000));
+      await tentar();
+    }
+    return { ok: true };
+  } catch (e) {
+    throw new Error("Falha ao enviar dados para o backend: " + ((e && e.message) || e));
+  }
+}
+
+// ---------- Firebase / Firestore (leitura ao vivo dos chamados, só pro admin) ----------
+
+// Sem isso, a tela de Chamados do admin só atualiza quando ele mesmo faz
+// alguma ação ou recarrega a página — o resto do estado (Categorias, Salas
+// etc.) já era assim, mas pra chamados isso é o problema real: com a escola
+// toda usando o app, um chamado novo de outra pessoa só aparecia depois de
+// um F5 manual. window.FIREBASE_CONFIG e o SDK (compat, via <script> no
+// index.html) são opcionais de propósito — se não estiverem presentes (app
+// ainda não configurado, ou CDN bloqueado), a função simplesmente não faz
+// nada e o app continua funcionando do jeito que já funcionava antes.
+let firebaseAppPromise = null;
+function getFirebaseApp_() {
+  if (typeof window === "undefined" || !window.firebase || !window.FIREBASE_CONFIG) return null;
+  if (!firebaseAppPromise) {
+    firebaseAppPromise = (async () => {
+      const app = window.firebase.apps && window.firebase.apps.length ? window.firebase.apps[0] : window.firebase.initializeApp(window.FIREBASE_CONFIG);
+      await window.firebase.auth().signInAnonymously();
+      return app;
+    })().catch((err) => {
+      firebaseAppPromise = null;
+      throw err;
+    });
+  }
+  return firebaseAppPromise;
+}
+
+// Retorna uma função pra cancelar a assinatura (chamar no cleanup do
+// useEffect / no logout). onChange recebe a lista inteira de chamados toda
+// vez que algo muda no Firestore (documento novo, editado ou removido).
+function assinarChamadosAoVivo(onChange) {
+  let cancelado = false;
+  let unsubscribeSnapshot = null;
+  const appPromise = getFirebaseApp_();
+  if (!appPromise) {
+    // Firebase não configurado (sem window.firebase e/ou window.FIREBASE_CONFIG):
+    // não tenta nada, app segue no jeito de sempre (leitura via doGet).
+    return () => {};
+  }
+  appPromise
+    .then(() => {
+      if (cancelado) return;
+      unsubscribeSnapshot = window.firebase
+        .firestore()
+        .collection("chamados")
+        .onSnapshot(
+          (snapshot) => {
+            const lista = snapshot.docs.map((d) => d.data());
+            onChange(lista);
+          },
+          () => {
+            // erro de permissão/rede: mantém o app funcionando com o que já tinha carregado
+          }
+        );
+    })
+    .catch(() => {
+      // Firebase não configurado ou indisponível: sem sincronização ao vivo,
+      // o app segue funcionando normalmente (leitura via doGet, como sempre foi).
+    });
+  return () => {
+    cancelado = true;
+    if (unsubscribeSnapshot) unsubscribeSnapshot();
+  };
+}
+
+const LOGO_DATA_URL = "data:image/png;base64,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";
+
+const SEED_INVENTORY = [{id:"CES-0001",categoria:"Notebook",marca:"Lenovo",modelo:"Chromebook",serie:"",sala:"Sala 103",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0002",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 103",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0003",categoria:"Roteador",marca:"Ubiquiti",modelo:"Access Point",serie:"",sala:"Sala 103",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0004",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 103",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0005",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 103",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0006",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 103",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0007",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 103",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0008",categoria:"Computador desktop",marca:"Dell",modelo:"Chromebook",serie:"",sala:"Sala 104",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0009",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 104",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0010",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 104",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0011",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 104",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0012",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 104",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0013",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 104",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0014",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 104",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0015",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 104",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0016",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 104",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0017",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 104",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0018",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 105",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0019",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 105",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0020",categoria:"Notebook",marca:"Lenovo",modelo:"Chromebook",serie:"",sala:"Sala 105",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0021",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 105",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0022",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 105",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0023",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 105",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0024",categoria:"Câmera",marca:"",modelo:"",serie:"",sala:"Sala 105",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0025",categoria:"Computador desktop",marca:"Dell",modelo:"Chromebook",serie:"",sala:"Sala 106",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0026",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 106",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0027",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 106",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0028",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 106",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0029",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 106",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0030",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 106",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0031",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 106",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0032",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 106",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0033",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 106",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0034",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 106",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0035",categoria:"Computador desktop",marca:"Dell",modelo:"Chromebook",serie:"",sala:"Sala 107",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0036",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 107",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0037",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 107",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0038",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 107",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0039",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 107",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0040",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 107",status:"Em uso",responsavel:"",observacoes:"somente 1 caixa funcionando",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0041",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 107",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0042",categoria:"Projetor",marca:"",modelo:"",serie:"",sala:"Sala 107",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0043",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 107",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0044",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 107",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0045",categoria:"Notebook",marca:"Lenovo",modelo:"Chromebook",serie:"",sala:"Sala 108",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0046",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 108",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0047",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 108",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0048",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 108",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0049",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 108",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0050",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 108",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0051",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 108",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0052",categoria:"Notebook",marca:"Lenovo",modelo:"Chromebook",serie:"",sala:"Sala 201",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0053",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 201",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0054",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 201",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0055",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 201",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0056",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 201",status:"Em uso",responsavel:"",observacoes:"1 caixa de som",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0057",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 201",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0058",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 201",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0059",categoria:"Computador desktop",marca:"Dell",modelo:"Chromebook",serie:"",sala:"Sala 202",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0060",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 202",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0061",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 202",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0062",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 202",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0063",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 202",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0064",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 202",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0065",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 202",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0066",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 202",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0067",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 202",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0068",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 202",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0069",categoria:"Computador desktop",marca:"Dell",modelo:"Chromebook",serie:"",sala:"Sala 203",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0070",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 203",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0071",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 203",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0072",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 203",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0073",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 203",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0074",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 203",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0075",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 203",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0076",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 203",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0077",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 203",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0078",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 203",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0079",categoria:"Computador desktop",marca:"Dell",modelo:"Chromebook",serie:"",sala:"Sala 204",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0080",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 204",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0081",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 204",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0082",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 204",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0083",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 204",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0084",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 204",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0085",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 204",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0086",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 204",status:"Em uso",responsavel:"",observacoes:"1 caixa de som",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0087",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 204",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0088",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 204",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0089",categoria:"Notebook",marca:"Lenovo",modelo:"Chromebook",serie:"",sala:"Sala 205",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0090",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 205",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0091",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 205",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0092",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 205",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0093",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 205",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0094",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 205",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0095",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 205",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0096",categoria:"Notebook",marca:"Lenovo",modelo:"Chromebook",serie:"",sala:"Sala 206",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0097",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 206",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0098",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 206",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0099",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 206",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0100",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 206",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0101",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 206",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0102",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 206",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0103",categoria:"Computador desktop",marca:"Dell",modelo:"Chromebook",serie:"",sala:"Sala 207",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0104",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 207",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0105",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 207",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0106",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 207",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0107",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 207",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0108",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 207",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0109",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 207",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0110",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 207",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0111",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 207",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0112",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 207",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0113",categoria:"Computador desktop",marca:"Dell",modelo:"Chromebook",serie:"",sala:"Sala 208",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0114",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 208",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0115",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 208",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0116",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 208",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0117",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 208",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0118",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 208",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0119",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 208",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0120",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 208",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0121",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 208",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0122",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 208",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0123",categoria:"Notebook",marca:"Lenovo",modelo:"Chromebook",serie:"",sala:"Sala 209",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0124",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 209",status:"Em manutenção",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0125",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 209",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0126",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 209",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0127",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 209",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0128",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 209",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0129",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 209",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0130",categoria:"Notebook",marca:"Lenovo",modelo:"Chromebook",serie:"",sala:"Sala 210",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0131",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 210",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0132",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 210",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0133",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 210",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0134",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 210",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0135",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 210",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0136",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 210",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0137",categoria:"Computador desktop",marca:"Dell",modelo:"Chromebook",serie:"",sala:"Sala 211",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0138",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 211",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0139",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 211",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0140",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 211",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0141",categoria:"Projetor",marca:"",modelo:"",serie:"",sala:"Sala 211",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0142",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 211",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0143",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 211",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0144",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 211",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0145",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 211",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0146",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 211",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0147",categoria:"Notebook",marca:"Lenovo",modelo:"Chromebook",serie:"",sala:"Sala 212",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0148",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 212",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0149",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 212",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0150",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 212",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0151",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 212",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0152",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 212",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0153",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 212",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0154",categoria:"Computador desktop",marca:"Dell",modelo:"",serie:"",sala:"Sala 213",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0155",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 213",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0156",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 213",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0157",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 213",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0158",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 213",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0159",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 213",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0160",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 213",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0161",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 213",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0162",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 213",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0163",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 213",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0164",categoria:"Computador desktop",marca:"Dell",modelo:"",serie:"",sala:"Sala 214",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0165",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 214",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0166",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 214",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0167",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 214",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0168",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 214",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0169",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 214",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0170",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 214",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0171",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 214",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0172",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 214",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0173",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 214",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0174",categoria:"Notebook",marca:"Lenovo",modelo:"",serie:"",sala:"Sala 215",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0175",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 215",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0176",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 215",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0177",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 215",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0178",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 215",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0179",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 215",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0180",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 215",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0181",categoria:"Computador desktop",marca:"Dell",modelo:"",serie:"",sala:"Sala 216",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0182",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 216",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0183",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 216",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0184",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 216",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0185",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 216",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0186",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 216",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0187",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 216",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0188",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 216",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0189",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 216",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0190",categoria:"Câmera",marca:"",modelo:"",serie:"",sala:"Sala 216",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0191",categoria:"Notebook",marca:"Lenovo",modelo:"",serie:"",sala:"Sala 217",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0192",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 217",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0193",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 217",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0194",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 217",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0195",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 217",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0196",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 217",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0197",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 217",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0198",categoria:"Computador desktop",marca:"Dell",modelo:"",serie:"",sala:"Sala 218",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0199",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 218",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0200",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 218",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0201",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 218",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0202",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 218",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0203",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 218",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0204",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 218",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0205",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 218",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0206",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 218",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0207",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 218",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0208",categoria:"Computador desktop",marca:"Dell",modelo:"",serie:"",sala:"Sala 219",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0209",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 219",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0210",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 219",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0211",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 219",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0212",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 219",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0213",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 219",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0214",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 219",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0215",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 219",status:"Em uso",responsavel:"",observacoes:"1 caixa de som",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0216",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 219",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0217",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 219",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0218",categoria:"Computador desktop",marca:"Dell",modelo:"",serie:"",sala:"Sala 220",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0219",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala 220",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0220",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala 220",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0221",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala 220",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0222",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 220",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0223",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 220",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0224",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 220",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0225",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 220",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0226",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 220",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0227",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 220",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0228",categoria:"Notebook",marca:"Dell",modelo:"",serie:"",sala:"Sala 221",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0229",categoria:"Projetor",marca:"Epson",modelo:"",serie:"",sala:"Sala 221",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0230",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Sala 221",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0231",categoria:"Sistema de som",marca:"",modelo:"",serie:"",sala:"Sala 221",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0232",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Sala 221",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0233",categoria:"Roteador",marca:"Ubiquiti",modelo:"",serie:"",sala:"Sala 221",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0234",categoria:"Câmera",marca:"Intelbras",modelo:"",serie:"",sala:"Sala 221",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0235",categoria:"Mini PC",marca:"Dell",modelo:"",serie:"",sala:"Sala Orientação",status:"Em uso",responsavel:"adriana",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0236",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala Orientação",status:"Em uso",responsavel:"adriana",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0237",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala Orientação",status:"Em uso",responsavel:"adriana",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0238",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala Orientação",status:"Em uso",responsavel:"adriana",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0239",categoria:"Telefone/ramal",marca:"",modelo:"",serie:"",sala:"Sala Orientação",status:"Em uso",responsavel:"adriana",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0240",categoria:"Computador desktop",marca:"Dell",modelo:"",serie:"",sala:"Entrada Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0241",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Entrada Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0242",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Entrada Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0243",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Entrada Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0244",categoria:"Telefone/ramal",marca:"Intelbras",modelo:"",serie:"",sala:"Entrada Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0245",categoria:"Fone de ouvido",marca:"",modelo:"",serie:"",sala:"Entrada Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0246",categoria:"Rádio",marca:"",modelo:"",serie:"",sala:"Entrada Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0247",categoria:"Rádio",marca:"",modelo:"",serie:"",sala:"Entrada Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0248",categoria:"Rádio",marca:"",modelo:"",serie:"",sala:"Entrada Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0249",categoria:"Rádio",marca:"",modelo:"",serie:"",sala:"Entrada Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0250",categoria:"Computador desktop",marca:"Dell",modelo:"",serie:"",sala:"Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0251",categoria:"Computador desktop",marca:"Lenovo",modelo:"",serie:"",sala:"Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0252",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0253",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0254",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0255",categoria:"Webcam",marca:"",modelo:"",serie:"",sala:"Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0256",categoria:"Telefone/ramal",marca:"",modelo:"",serie:"",sala:"Secretaria",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0257",categoria:"Notebook",marca:"",modelo:"",serie:"",sala:"Entrada Alunos",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0258",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Entrada Alunos",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0259",categoria:"Computador desktop",marca:"Dell",modelo:"",serie:"",sala:"Sala Xerox",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0260",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Sala Xerox",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0261",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala Xerox",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0262",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala Xerox",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0263",categoria:"Impressora/Multifuncional",marca:"Epson",modelo:"",serie:"",sala:"Sala Xerox",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0264",categoria:"Impressora/Multifuncional",marca:"Epson",modelo:"",serie:"",sala:"Sala Xerox",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0265",categoria:"Nobreak/Estabilizador",marca:"",modelo:"",serie:"",sala:"Sala Xerox",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0266",categoria:"Impressora/Multifuncional",marca:"Samsung",modelo:"",serie:"",sala:"Sala Xerox",status:"Precisa de manutenção",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0267",categoria:"Impressora/Multifuncional",marca:"Samsung",modelo:"",serie:"",sala:"Sala Xerox",status:"Precisa de manutenção",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0268",categoria:"Telefone/ramal",marca:"",modelo:"",serie:"",sala:"Sala Xerox",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0269",categoria:"Computador desktop",marca:"Dell",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0270",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0271",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0272",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0273",categoria:"Mini PC",marca:"Dell",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0274",categoria:"Monitor",marca:"Dell",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0275",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0276",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0277",categoria:"Caixa de som",marca:"",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0278",categoria:"Leitor de código",marca:"",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0279",categoria:"Nobreak/Estabilizador",marca:"",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0280",categoria:"Impressora/Multifuncional",marca:"Hp",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0281",categoria:"Impressora/Multifuncional",marca:"",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"imprimi etiqueta",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0282",categoria:"Telefone/ramal",marca:"",modelo:"",serie:"",sala:"Biblioteca",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0283",categoria:"Projetor",marca:"",modelo:"",serie:"",sala:"Laboratório De Ciências",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0284",categoria:"Tela-projetor",marca:"",modelo:"",serie:"",sala:"Laboratório De Ciências",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0285",categoria:"Caixa de som",marca:"Jbl",modelo:"",serie:"",sala:"Laboratório De Ciências",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0286",categoria:"Telefone/ramal",marca:"",modelo:"",serie:"",sala:"Laboratório De Ciências",status:"Precisa de manutenção",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0287",categoria:"Mini PC",marca:"Dell",modelo:"",serie:"",sala:"Coordenação 2 Sonia",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0288",categoria:"Monitor",marca:"",modelo:"",serie:"",sala:"Coordenação 2 Sonia",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0289",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Coordenação 2 Sonia",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0290",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Coordenação 2 Sonia",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0291",categoria:"Webcam",marca:"",modelo:"",serie:"",sala:"Coordenação 2 Sonia",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0292",categoria:"Rádio",marca:"",modelo:"",serie:"",sala:"Coordenação 2 Sonia",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0293",categoria:"Telefone/ramal",marca:"",modelo:"",serie:"",sala:"Coordenação 2 Sonia",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0294",categoria:"Computador desktop",marca:"",modelo:"",serie:"",sala:"Coordenação Dos Turno",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0295",categoria:"Monitor",marca:"",modelo:"",serie:"",sala:"Coordenação Dos Turno",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0296",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Coordenação Dos Turno",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0297",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Coordenação Dos Turno",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0298",categoria:"Nvr",marca:"",modelo:"",serie:"",sala:"Coordenação Dos Turno",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0299",categoria:"Telefone/ramal",marca:"",modelo:"",serie:"",sala:"Coordenação Dos Turno",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0300",categoria:"Computador desktop",marca:"",modelo:"",serie:"",sala:"Sala Rh Ponto",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0301",categoria:"Monitor",marca:"",modelo:"",serie:"",sala:"Sala Rh Ponto",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0302",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Sala Rh Ponto",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0303",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Sala Rh Ponto",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0304",categoria:"Telefone/ramal",marca:"",modelo:"",serie:"",sala:"Sala Rh Ponto",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0305",categoria:"Mini PC",marca:"Dell",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0306",categoria:"Monitor",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0307",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0308",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0309",categoria:"Mini PC",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0310",categoria:"Monitor",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0311",categoria:"Teclado",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0312",categoria:"Mouse",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0313",categoria:"Impressora/Multifuncional",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0314",categoria:"Telefone/ramal",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0315",categoria:"Telefone/ramal",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0316",categoria:"Leitor de código",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0317",categoria:"Leitor de código",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""},
+{id:"CES-0318",categoria:"Triturador",marca:"",modelo:"",serie:"",sala:"Financeiro",status:"Em uso",responsavel:"",observacoes:"",dataCompra:"",valor:"",vidaUtil:""}];
+
+const SEED_AREAS = [{id:"AR-001",nome:"Biblioteca",tipo:"Biblioteca"},
+{id:"AR-002",nome:"Coordenação Dos Turno",tipo:"Administrativo"},
+{id:"AR-003",nome:"Coordenação 2 Sonia",tipo:"Administrativo"},
+{id:"AR-004",nome:"Entrada Alunos",tipo:"Administrativo"},
+{id:"AR-005",nome:"Entrada Secretaria",tipo:"Administrativo"},
+{id:"AR-006",nome:"Financeiro",tipo:"Administrativo"},
+{id:"AR-007",nome:"Laboratório De Ciências",tipo:"Laboratório"},
+{id:"AR-008",nome:"Sala 103",tipo:"Sala de aula"},
+{id:"AR-009",nome:"Sala 104",tipo:"Sala de aula"},
+{id:"AR-010",nome:"Sala 105",tipo:"Sala de aula"},
+{id:"AR-011",nome:"Sala 106",tipo:"Sala de aula"},
+{id:"AR-012",nome:"Sala 107",tipo:"Sala de aula"},
+{id:"AR-013",nome:"Sala 108",tipo:"Sala de aula"},
+{id:"AR-014",nome:"Sala 201",tipo:"Sala de aula"},
+{id:"AR-015",nome:"Sala 202",tipo:"Sala de aula"},
+{id:"AR-016",nome:"Sala 203",tipo:"Sala de aula"},
+{id:"AR-017",nome:"Sala 204",tipo:"Sala de aula"},
+{id:"AR-018",nome:"Sala 205",tipo:"Sala de aula"},
+{id:"AR-019",nome:"Sala 206",tipo:"Sala de aula"},
+{id:"AR-020",nome:"Sala 207",tipo:"Sala de aula"},
+{id:"AR-021",nome:"Sala 208",tipo:"Sala de aula"},
+{id:"AR-022",nome:"Sala 209",tipo:"Sala de aula"},
+{id:"AR-023",nome:"Sala 210",tipo:"Sala de aula"},
+{id:"AR-024",nome:"Sala 211",tipo:"Sala de aula"},
+{id:"AR-025",nome:"Sala 212",tipo:"Sala de aula"},
+{id:"AR-026",nome:"Sala 213",tipo:"Sala de aula"},
+{id:"AR-027",nome:"Sala 214",tipo:"Sala de aula"},
+{id:"AR-028",nome:"Sala 215",tipo:"Sala de aula"},
+{id:"AR-029",nome:"Sala 216",tipo:"Sala de aula"},
+{id:"AR-030",nome:"Sala 217",tipo:"Sala de aula"},
+{id:"AR-031",nome:"Sala 218",tipo:"Sala de aula"},
+{id:"AR-032",nome:"Sala 219",tipo:"Sala de aula"},
+{id:"AR-033",nome:"Sala 220",tipo:"Sala de aula"},
+{id:"AR-034",nome:"Sala 221",tipo:"Sala de aula"},
+{id:"AR-035",nome:"Sala Orientação",tipo:"Administrativo"},
+{id:"AR-036",nome:"Sala Rh Ponto",tipo:"Administrativo"},
+{id:"AR-037",nome:"Sala Xerox",tipo:"Administrativo"},
+{id:"AR-038",nome:"Secretaria",tipo:"Administrativo"}];
+
+const DEFAULT_CATEGORIES = ["Computador desktop","Notebook","Mini PC","Monitor","Teclado","Mouse","Projetor","Tela-projetor","Roteador","Nobreak/Estabilizador","Impressora/Multifuncional","Nvr","Câmera","Caixa de som","Sistema de som","Telefone/ramal","Fone de ouvido","Webcam","Rádio","Triturador","Leitor de código"];
+const STATUS_OPTIONS = ["Em uso", "Em manutenção", "Precisa de manutenção", "Em estoque", "Descartado"];
+const TIPO_AREA_OPTIONS = ["Sala de aula", "Laboratório", "Biblioteca", "Administrativo", "Outro"];
+
+const COLORS = {
+  ink: "#16233D",
+  inkSoft: "#4B5768",
+  paper: "#F7F5EF",
+  surface: "#FFFFFF",
+  line: "#E1DDD0",
+  lineStrong: "#C9C3B2",
+  accent: "#C97A2B",
+  accentSoft: "#F3E2C8",
+  danger: "#B23A32",
+  dangerSoft: "#F6E1DE",
+};
+
+const STATUS_COLORS = {
+  "Em uso": "#2F6F5E",
+  "Em manutenção": "#C97A2B",
+  "Precisa de manutenção": "#B23A32",
+  "Em estoque": "#6B7280",
+  "Descartado": "#9CA3AF",
+};
+
+const STATUS_BG = {
+  "Em uso": "#E3EEE9",
+  "Em manutenção": "#F3E2C8",
+  "Precisa de manutenção": "#F6E1DE",
+  "Em estoque": "#E9EAEC",
+  "Descartado": "#EEEEEE",
+};
+
+function uid(prefix) {
+  return prefix + "-" + Math.random().toString(36).slice(2, 8).toUpperCase();
+}
+
+function resizeImageParaBase64(file, maxDim, qualidade) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.width;
+        let h = img.height;
+        if (w > h && w > maxDim) {
+          h = Math.round(h * (maxDim / w));
+          w = maxDim;
+        } else if (h > maxDim) {
+          w = Math.round(w * (maxDim / h));
+          h = maxDim;
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", qualidade));
+      };
+      img.onerror = reject;
+      img.src = ev.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function nextPatrimonio(inventario, prefixo) {
+  let max = 0;
+  inventario.forEach((r) => {
+    const m = /(\d+)$/.exec(r.id || "");
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (r.id.startsWith(prefixo) && n > max) max = n;
+    }
+  });
+  return prefixo + "-" + String(max + 1).padStart(4, "0");
+}
+
+function comparaPatrimonio(a, b) {
+  const pa = String(a || "");
+  const pb = String(b || "");
+  const ma = /^(.*?)(\d+)$/.exec(pa);
+  const mb = /^(.*?)(\d+)$/.exec(pb);
+  if (ma && mb && ma[1] === mb[1]) {
+    return parseInt(ma[2], 10) - parseInt(mb[2], 10);
+  }
+  return pa.localeCompare(pb, "pt-BR", { numeric: true });
+}
+
+function ordenarPorNome(lista, campo) {
+  return [...lista].sort((a, b) => String(a[campo] || "").localeCompare(String(b[campo] || ""), "pt-BR"));
+}
+
+function buildSeedState() {
+  return {
+    prefixo: "CES",
+    categorias: DEFAULT_CATEGORIES.slice(),
+    areas: SEED_AREAS.map((a) => ({ ...a })),
+    responsaveis: [],
+    inventario: SEED_INVENTORY.map((r) => ({ ...r })),
+    chamados: [],
+  };
+}
+
+const CHAMADO_STATUS_OPTIONS = ["Aberto", "Em andamento", "Resolvido"];
+const CHAMADO_STATUS_COLORS = {
+  Aberto: "#B23A32",
+  "Em andamento": "#C97A2B",
+  Resolvido: "#2F6F5E",
+};
+const CHAMADO_STATUS_BG = {
+  Aberto: "#F6E1DE",
+  "Em andamento": "#F3E2C8",
+  Resolvido: "#E3EEE9",
+};
+
+function formatDateTime(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString("pt-BR") + " " + d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  } catch (e) {
+    return "";
+  }
+}
+
+function downloadBlob(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function toCSV(rows, columns) {
+  const esc = (v) => {
+    const s = v === undefined || v === null ? "" : String(v);
+    if (/[",\n;]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  };
+  const header = columns.map((c) => esc(c.label)).join(";");
+  const body = rows.map((r) => columns.map((c) => esc(r[c.key])).join(";")).join("\n");
+  return header + "\n" + body;
+}
+
+// ---------- Shared UI bits ----------
+
+function Field({ label, children }) {
+  return (
+    <label style={{ display: "block", marginBottom: 14 }}>
+      <span style={{ display: "block", fontSize: 13, color: COLORS.inkSoft, marginBottom: 5 }}>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+const inputStyle = {
+  width: "100%",
+  boxSizing: "border-box",
+  padding: "8px 10px",
+  fontSize: 14,
+  border: `1px solid ${COLORS.lineStrong}`,
+  borderRadius: 6,
+  background: "#fff",
+  color: COLORS.ink,
+  outline: "none",
+};
+
+function TextInput(props) {
+  return <input {...props} style={{ ...inputStyle, ...(props.style || {}) }} />;
+}
+
+function Select(props) {
+  return (
+    <select {...props} style={{ ...inputStyle, ...(props.style || {}) }}>
+      {props.children}
+    </select>
+  );
+}
+
+function Button({ variant = "ghost", icon: Icon, children, style, ...rest }) {
+  const base = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    fontSize: 13.5,
+    fontWeight: 600,
+    padding: "8px 14px",
+    borderRadius: 6,
+    cursor: "pointer",
+    border: "1px solid transparent",
+    lineHeight: 1,
+  };
+  const variants = {
+    primary: { background: COLORS.ink, color: "#fff", border: `1px solid ${COLORS.ink}` },
+    accent: { background: COLORS.accent, color: "#fff", border: `1px solid ${COLORS.accent}` },
+    ghost: { background: "#fff", color: COLORS.ink, border: `1px solid ${COLORS.lineStrong}` },
+    danger: { background: "#fff", color: COLORS.danger, border: `1px solid ${COLORS.danger}` },
+  };
+  return (
+    <button {...rest} style={{ ...base, ...variants[variant], ...(style || {}) }}>
+      {Icon ? <Icon size={15} /> : null}
+      {children}
+    </button>
+  );
+}
+
+const CATEGORIA_ICON_SVGS = {
+  "computador desktop": <><rect x="4" y="4" width="16" height="10" rx="1.5" /><path d="M9 18h6M12 14v4" /></>,
+  "notebook": <><rect x="5" y="4" width="14" height="9" rx="1.5" /><path d="M3 18h18l-1.5-3h-15z" /></>,
+  "mini pc": <><rect x="4" y="7" width="16" height="13" rx="1.5" /><path d="M4 11h16M9 7V5h6v2" /></>,
+  "monitor": <><rect x="4" y="4" width="16" height="11" rx="1.5" /><path d="M9 20h6M12 15v5" /></>,
+  "teclado": <><rect x="3" y="7" width="18" height="10" rx="1.5" /><path d="M6 11h.01M9 11h.01M12 11h.01M15 11h.01M18 11h.01M8 14h8" /></>,
+  "mouse": <><rect x="8" y="3" width="8" height="14" rx="4" /><path d="M12 3v5" /></>,
+  "projetor": <><rect x="3" y="7" width="12" height="9" rx="2" /><circle cx="17" cy="11.5" r="3.5" /></>,
+  "tela-projetor": <><rect x="4" y="4" width="16" height="11" rx="1" /><path d="M12 15v5M8 20h8" /></>,
+  "roteador": <><rect x="3" y="13" width="18" height="7" rx="2" /><path d="M8 13L6 4M16 13l2-9" /><circle cx="12" cy="16.5" r="1" /></>,
+  "nobreak/estabilizador": <><rect x="6" y="3" width="12" height="18" rx="1.5" /><path d="M13 7l-4 6h3l-1 5 5-7h-3z" /></>,
+  "impressora/multifuncional": <><rect x="5" y="9" width="14" height="7" rx="1" /><path d="M7 9V4h10v5M7 16v4h10v-4" /></>,
+  "nvr": <><rect x="4" y="6" width="16" height="12" rx="1.5" /><path d="M4 11h16" /><circle cx="18" cy="14.5" r=".6" fill="currentColor" /></>,
+  "câmera": <><rect x="3" y="7" width="14" height="11" rx="2" /><circle cx="10" cy="12.5" r="3.5" /><path d="M14 9h4l2-2v9l-2-2h-4" /></>,
+  "caixa de som": <><rect x="7" y="3" width="10" height="18" rx="2" /><circle cx="12" cy="8" r="1.4" /><circle cx="12" cy="15" r="3" /></>,
+  "sistema de som": <><rect x="4" y="4" width="7" height="16" rx="1.5" /><rect x="13" y="4" width="7" height="16" rx="1.5" /><circle cx="7.5" cy="9" r="1.2" /><circle cx="16.5" cy="9" r="1.2" /></>,
+  "telefone/ramal": <><rect x="7" y="2" width="10" height="20" rx="2.5" /><path d="M10 18h4" /></>,
+  "fone de ouvido": <><path d="M4 14v-2a8 8 0 0116 0v2" /><rect x="3" y="14" width="4" height="6" rx="1.5" /><rect x="17" y="14" width="4" height="6" rx="1.5" /></>,
+  "webcam": <><circle cx="12" cy="10" r="5" /><path d="M9 20h6M12 15v5" /></>,
+  "rádio": <><rect x="3" y="9" width="18" height="10" rx="2" /><path d="M7 9l1-6M16 3l1 6" /><circle cx="8" cy="14" r="1.6" /></>,
+  "triturador": <><path d="M5 4h14v6H5z" /><path d="M6 10l1.5 10h9L18 10" /></>,
+  "leitor de código": <><path d="M4 5v14M8 5v14M11 5v14M13 5v14M17 5v14M20 5v14" /></>,
+};
+
+const CATEGORIA_ICON_DEFAULT = <><rect x="4" y="7" width="16" height="13" rx="1.5" /><path d="M4 11h16M9 7V5h6v2" /></>;
+
+function CategoriaIcon({ categoria, size = 15, color = "currentColor", style }) {
+  const key = (categoria || "").trim().toLowerCase();
+  const svgInner = CATEGORIA_ICON_SVGS[key] || CATEGORIA_ICON_DEFAULT;
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, ...style }}>
+      {svgInner}
+    </svg>
+  );
+}
+
+function StatusPill({ status }) {
+  const c = STATUS_COLORS[status] || COLORS.inkSoft;
+  const bg = STATUS_BG[status] || "#eee";
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "3px 10px",
+        borderRadius: 999,
+        fontSize: 12.5,
+        fontWeight: 600,
+        color: c,
+        background: bg,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {status}
+    </span>
+  );
+}
+
+function Panel({ title, action, children, style }) {
+  return (
+    <div
+      style={{
+        background: COLORS.surface,
+        border: `1px solid ${COLORS.line}`,
+        borderRadius: 8,
+        padding: 20,
+        ...style,
+      }}
+    >
+      {(title || action) && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          {title ? <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: COLORS.ink }}>{title}</h3> : <span />}
+          {action}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+}
+
+function Modal({ title, onClose, children, width = 460 }) {
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(22,35,61,0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 50,
+        padding: 20,
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: "#fff",
+          borderRadius: 10,
+          padding: 24,
+          width,
+          maxWidth: "100%",
+          maxHeight: "85vh",
+          overflow: "auto",
+          boxShadow: "0 12px 40px rgba(0,0,0,0.25)",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: COLORS.ink }}>{title}</h3>
+          <button
+            onClick={onClose}
+            style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.inkSoft, padding: 4 }}
+            aria-label="Fechar"
+          >
+            <X size={18} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ text }) {
+  return (
+    <div style={{ padding: "32px 12px", textAlign: "center", color: COLORS.inkSoft, fontSize: 14 }}>{text}</div>
+  );
+}
+
+const AVATAR_COLORS = ["#2F6F5E", "#C97A2B", "#2B5B8C", "#8C4B2F", "#6B4E9E", "#B23A32", "#4B5768"];
+
+function corAvatar(nome) {
+  const s = String(nome || "?");
+  let hash = 0;
+  for (let i = 0; i < s.length; i++) hash = (hash * 31 + s.charCodeAt(i)) >>> 0;
+  return AVATAR_COLORS[hash % AVATAR_COLORS.length];
+}
+
+function iniciais(nome) {
+  const partes = String(nome || "?").trim().split(/\s+/);
+  if (partes.length === 1) return partes[0].slice(0, 2).toUpperCase();
+  return (partes[0][0] + partes[partes.length - 1][0]).toUpperCase();
+}
+
+function Avatar({ nome, foto, size = 30 }) {
+  if (foto) {
+    return (
+      <img
+        src={foto}
+        alt={nome || ""}
+        style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }}
+      />
+    );
+  }
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        borderRadius: "50%",
+        background: corAvatar(nome),
+        color: "#fff",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontSize: size * 0.38,
+        fontWeight: 700,
+        flexShrink: 0,
+      }}
+    >
+      {iniciais(nome)}
+    </div>
+  );
+}
+
+function tempoDecorrido(iso) {
+  try {
+    const d = new Date(iso);
+    const diffMs = Date.now() - d.getTime();
+    const min = Math.floor(diffMs / 60000);
+    if (min < 1) return "agora mesmo";
+    if (min < 60) return "há " + min + " min";
+    const h = Math.floor(min / 60);
+    if (h < 24) return "há " + h + "h";
+    const dias = Math.floor(h / 24);
+    return "há " + dias + " dia" + (dias > 1 ? "s" : "");
+  } catch (e) {
+    return "";
+  }
+}
+
+// ---------- Sidebar ----------
+
+const UNIDADES = [
+  { id: "colegio", nome: "Colégio Espírito Santo" },
+  { id: "maternal", nome: "Maternal" },
+  { id: "bercario", nome: "Berçário" },
+  { id: "madrejosefa", nome: "Madre Josefa" },
+];
+
+function unidadeDe(item) {
+  return (item && item.unidade) || "colegio";
+}
+
+function normalizarCategorias(lista) {
+  return (lista || []).map((c) => (typeof c === "string" ? { nome: c, unidade: "colegio" } : c));
+}
+
+function nomesCategoriasDaUnidade(categorias, unidade) {
+  return (categorias || []).filter((c) => unidadeDe(c) === unidade).map((c) => c.nome);
+}
+
+function UnidadeTabs({ unidade, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: `1px solid ${COLORS.line}`, flexWrap: "wrap" }}>
+      {UNIDADES.map((u) => {
+        const active = unidade === u.id;
+        return (
+          <button
+            key={u.id}
+            onClick={() => onChange(u.id)}
+            style={{
+              padding: "9px 16px",
+              fontSize: 13,
+              fontWeight: active ? 600 : 500,
+              color: active ? COLORS.ink : COLORS.inkSoft,
+              background: "none",
+              border: "none",
+              borderBottom: active ? `2px solid ${COLORS.accent}` : "2px solid transparent",
+              cursor: "pointer",
+            }}
+          >
+            {u.nome}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+const NAV_ITEMS = [
+  { key: "dashboard", label: "Painel", icon: LayoutDashboard },
+  { key: "inventario", label: "Inventário", icon: Boxes },
+  { key: "categorias", label: "Categorias", icon: Tag },
+  { key: "areas", label: "Salas", icon: DoorOpen },
+  { key: "responsaveis", label: "Responsáveis", icon: Users },
+  { key: "relatorios", label: "Relatórios", icon: FileBarChart },
+  { key: "chamados", label: "Chamados", icon: MessageSquare },
+  { key: "importar", label: "Importar/Exportar", icon: Upload },
+];
+
+const NAV_GROUPS = [
+  { label: "Painel", keys: ["dashboard"] },
+  { label: "Inventário", keys: ["inventario", "categorias", "areas", "responsaveis"] },
+  { label: "Chamados", keys: ["chamados"] },
+  { label: "Administração", keys: ["relatorios", "importar", "usuarios", "administradores"] },
+];
+
+const ADMIN_NAV_ITEM = { key: "administradores", label: "Administradores", icon: Users };
+const USUARIOS_NAV_ITEM = { key: "usuarios", label: "Usuários", icon: Users };
+const NAV_ITEM_MAP = {
+  ...Object.fromEntries(NAV_ITEMS.map((i) => [i.key, i])),
+  administradores: ADMIN_NAV_ITEM,
+  usuarios: USUARIOS_NAV_ITEM,
+};
+
+function isAcessoTotal(permissoes) {
+  return !permissoes || String(permissoes).trim().toLowerCase() === "todas";
+}
+
+function getAllowedSections(permissoes) {
+  if (isAcessoTotal(permissoes)) return NAV_ITEMS.map((i) => i.key);
+  return permissoes
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function Sidebar({ view, onNavigate, onNavigateCategoria, mobileOpen, nome, permissoes, podeEditar, onLogout, categorias, unidadeAtiva }) {
+  const isMaster = isAcessoTotal(permissoes);
+  const allowed = useMemo(() => new Set(getAllowedSections(permissoes)), [permissoes]);
+  const [openGroups, setOpenGroups] = useState(() => {
+    const init = {};
+    NAV_GROUPS.forEach((g) => (init[g.label] = true));
+    return init;
+  });
+  const [catListOpen, setCatListOpen] = useState(true);
+
+  const groups = NAV_GROUPS.map((g) => ({
+    label: g.label,
+    items: g.keys.filter((k) => (k === "administradores" || k === "usuarios" ? isMaster : allowed.has(k))).map((k) => NAV_ITEM_MAP[k]),
+  })).filter((g) => g.items.length > 0);
+
+  function toggleGroup(label) {
+    setOpenGroups((prev) => ({ ...prev, [label]: !prev[label] }));
+  }
+
+  return (
+    <div
+      className={"app-sidebar" + (mobileOpen ? " open" : "")}
+      style={{
+        width: 220,
+        flexShrink: 0,
+        background: COLORS.ink,
+        color: "#fff",
+        padding: "22px 14px",
+        minHeight: "100%",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      <div style={{ padding: "0 8px 20px 8px", display: "flex", alignItems: "center", gap: 10 }}>
+        <img src={LOGO_DATA_URL} alt="Logo Colégio Espírito Santo" style={{ width: 34, height: 34, flexShrink: 0, background: "#fff", borderRadius: 6, padding: 2 }} />
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: 0.2, color: "#fff" }}>Inventário de TI</div>
+          <div style={{ fontSize: 12, color: "#9AA6B8", marginTop: 2 }}>Escola Espírito Santo</div>
+        </div>
+      </div>
+      <nav style={{ flex: 1, overflowY: "auto" }}>
+        {groups.map((group) => {
+          const isOpen = openGroups[group.label] !== false;
+          return (
+            <div key={group.label} style={{ marginBottom: 4 }}>
+              <button
+                onClick={() => toggleGroup(group.label)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  width: "100%",
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: "10px 10px 4px",
+                }}
+              >
+                <span style={{ fontSize: 10, letterSpacing: 0.4, textTransform: "uppercase", color: "#7D8AA0" }}>{group.label}</span>
+                <ChevronRight
+                  size={12}
+                  style={{ color: "#7D8AA0", transform: isOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s ease" }}
+                />
+              </button>
+              {isOpen &&
+                group.items.map((item) => {
+                  const Icon = item.icon;
+                  const active = view === item.key;
+                  const categoriasUnidade = group.label === "Inventário" && item.key === "inventario" ? [...nomesCategoriasDaUnidade(categorias, unidadeAtiva || "colegio")].sort((a, b) => a.localeCompare(b, "pt-BR")) : [];
+                  const temSubCategorias = categoriasUnidade.length > 0;
+                  return (
+                    <React.Fragment key={item.key}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 2, marginBottom: 2 }}>
+                        <button
+                          onClick={() => onNavigate(item.key)}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                            flex: 1,
+                            padding: "9px 10px",
+                            background: active ? "rgba(255,255,255,0.12)" : "transparent",
+                            border: "none",
+                            borderRadius: 6,
+                            color: active ? "#fff" : "#B7C0CF",
+                            fontSize: 13.5,
+                            fontWeight: active ? 600 : 500,
+                            cursor: "pointer",
+                            textAlign: "left",
+                          }}
+                        >
+                          <Icon size={16} />
+                          {item.label}
+                        </button>
+                        {temSubCategorias && (
+                          <button
+                            onClick={() => setCatListOpen((v) => !v)}
+                            title={catListOpen ? "Esconder equipamentos" : "Mostrar equipamentos"}
+                            style={{ background: "none", border: "none", cursor: "pointer", padding: "6px 8px", color: "#7D8AA0", flexShrink: 0 }}
+                          >
+                            <ChevronRight size={13} style={{ transform: catListOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s ease" }} />
+                          </button>
+                        )}
+                      </div>
+                      {temSubCategorias && catListOpen && (
+                        <div style={{ marginBottom: 4 }}>
+                          {categoriasUnidade.map((cat) => (
+                            <button
+                              key={cat}
+                              onClick={() => onNavigateCategoria(cat)}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                width: "100%",
+                                padding: "6px 10px 6px 26px",
+                                background: "transparent",
+                                border: "none",
+                                borderRadius: 6,
+                                color: "#9AA6B8",
+                                fontSize: 12,
+                                cursor: "pointer",
+                                textAlign: "left",
+                              }}
+                            >
+                              <CategoriaIcon categoria={cat} size={13} color="#9AA6B8" />
+                              {cat}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+            </div>
+          );
+        })}
+      </nav>
+      <div style={{ borderTop: "1px solid rgba(255,255,255,0.12)", paddingTop: 12, marginTop: 12 }}>
+        <div style={{ fontSize: 12, color: "#fff", fontWeight: 600, marginBottom: 2 }}>{nome || "Administrador"}</div>
+        <div style={{ fontSize: 11, color: "#9AA6B8", marginBottom: 10 }}>
+          {isMaster ? "Acesso total" : podeEditar ? "Acesso restrito · pode editar" : "Acesso restrito · só visualização"}
+        </div>
+        <button
+          onClick={onLogout}
+          style={{
+            width: "100%",
+            padding: "7px 10px",
+            background: "rgba(255,255,255,0.08)",
+            border: "1px solid rgba(255,255,255,0.2)",
+            borderRadius: 6,
+            color: "#fff",
+            fontSize: 12.5,
+            cursor: "pointer",
+          }}
+        >
+          Sair
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Dashboard ----------
+
+const DASH_VIEW_STORAGE_KEY = "inventario-ti-dashview";
+
+function StatTile({ icon: Icon, emoji, value, label, accent, onClick }) {
+  const [hover, setHover] = useState(false);
+  const clickable = !!onClick;
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => clickable && setHover(true)}
+      onMouseLeave={() => clickable && setHover(false)}
+      style={{
+        background: COLORS.surface,
+        border: `1px solid ${clickable && hover ? COLORS.accent : COLORS.line}`,
+        borderRadius: 8,
+        padding: "14px 16px",
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        position: "relative",
+        cursor: clickable ? "pointer" : "default",
+        boxShadow: clickable && hover ? "0 4px 14px rgba(201,122,43,0.18)" : "none",
+        transform: clickable && hover ? "translateY(-1px)" : "none",
+        transition: "border-color .15s, box-shadow .15s, transform .15s",
+      }}
+    >
+      <div
+        style={{
+          width: 36,
+          height: 36,
+          borderRadius: 8,
+          background: accent ? COLORS.accentSoft : COLORS.paper,
+          color: accent ? COLORS.accent : COLORS.inkSoft,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+        }}
+      >
+        {emoji ? <span style={{ fontSize: 18, lineHeight: 1 }}>{emoji}</span> : <Icon size={18} />}
+      </div>
+      <div>
+        <div style={{ fontSize: 20, fontWeight: 700, color: accent ? COLORS.accent : COLORS.ink, lineHeight: 1 }}>{value}</div>
+        <div style={{ fontSize: 11.5, color: COLORS.inkSoft, marginTop: 3 }}>{label}</div>
+      </div>
+      {clickable && (
+        <ChevronRight size={13} style={{ position: "absolute", top: 8, right: 8, color: COLORS.accent, opacity: hover ? 1 : 0, transition: "opacity .15s" }} />
+      )}
+    </div>
+  );
+}
+
+function Dashboard({ state, setView, unidadeAtiva, onAbrirChamado, onFiltrarStatus, onFiltrarTipoArea }) {
+  const inv = useMemo(() => state.inventario.filter((r) => unidadeDe(r) === unidadeAtiva), [state.inventario, unidadeAtiva]);
+  const areasUnidade = useMemo(() => state.areas.filter((a) => unidadeDe(a) === unidadeAtiva), [state.areas, unidadeAtiva]);
+  const categoriasUnidade = useMemo(() => nomesCategoriasDaUnidade(state.categorias, unidadeAtiva), [state.categorias, unidadeAtiva]);
+  const [dashView, setDashView] = useState(() => {
+    try {
+      return localStorage.getItem(DASH_VIEW_STORAGE_KEY) || "geral";
+    } catch (e) {
+      return "geral";
+    }
+  });
+  const [principal, setPrincipal] = useState(() => {
+    try {
+      return localStorage.getItem(DASH_VIEW_STORAGE_KEY) || "geral";
+    } catch (e) {
+      return "geral";
+    }
+  });
+
+  function marcarPrincipal(v) {
+    try {
+      localStorage.setItem(DASH_VIEW_STORAGE_KEY, v);
+    } catch (e) {}
+    setPrincipal(v);
+  }
+
+  const porStatus = useMemo(() => {
+    const map = {};
+    STATUS_OPTIONS.forEach((s) => (map[s] = 0));
+    inv.forEach((r) => (map[r.status] = (map[r.status] || 0) + 1));
+    return STATUS_OPTIONS.map((s) => ({ name: s, value: map[s] })).filter((d) => d.value > 0);
+  }, [inv]);
+
+  const porCategoria = useMemo(() => {
+    const map = {};
+    inv.forEach((r) => (map[r.categoria] = (map[r.categoria] || 0) + 1));
+    return Object.entries(map)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+  }, [inv]);
+
+  const porSala = useMemo(() => {
+    const map = {};
+    inv.forEach((r) => {
+      const k = r.sala || "Sem sala";
+      map[k] = (map[k] || 0) + 1;
+    });
+    return Object.entries(map)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+  }, [inv]);
+
+  const precisamAtencao = useMemo(
+    () => inv.filter((r) => r.status === "Precisa de manutenção" || r.status === "Em manutenção"),
+    [inv]
+  );
+
+  const garantiasVencendo = useMemo(() => {
+    return inv
+      .map((r) => ({ item: r, dias: diasParaVencerGarantia(r.dataCompra, r.vidaUtil) }))
+      .filter((x) => x.dias !== null && x.dias <= 90)
+      .sort((a, b) => a.dias - b.dias);
+  }, [inv]);
+
+  const total = inv.length;
+  const emUso = inv.filter((r) => r.status === "Em uso").length;
+  const emManutencao = inv.filter((r) => r.status === "Em manutenção").length;
+  const precisaManutencao = inv.filter((r) => r.status === "Precisa de manutenção").length;
+  const emEstoque = inv.filter((r) => r.status === "Em estoque").length;
+  const descartado = inv.filter((r) => r.status === "Descartado").length;
+
+  const emUsoPct = total > 0 ? Math.round((emUso / total) * 100) : 0;
+
+  const statusGradient = useMemo(() => {
+    if (total === 0) return COLORS.line;
+    let acc = 0;
+    const stops = porStatus.map((s) => {
+      const pct = (s.value / total) * 100;
+      const start = acc;
+      acc += pct;
+      return `${STATUS_COLORS[s.name]} ${start}% ${acc}%`;
+    });
+    return `conic-gradient(${stops.join(", ")})`;
+  }, [porStatus, total]);
+
+  const chamadosAbertos = useMemo(() => {
+    return (state.chamados || [])
+      .filter((c) => unidadeDe(c) === unidadeAtiva && (c.status === "Aberto" || c.status === "Em andamento"))
+      .sort((a, b) => new Date(b.criadoEm) - new Date(a.criadoEm));
+  }, [state.chamados, unidadeAtiva]);
+
+  const kpis = [
+    { label: "Total de equipamentos", value: total },
+    { label: "Em uso", value: emUso },
+    { label: "Em manutenção", value: emManutencao },
+    { label: "Precisa de manutenção", value: precisaManutencao },
+    { label: "Em estoque", value: emEstoque },
+    { label: "Descartado", value: descartado },
+    { label: "Salas cadastradas", value: areasUnidade.length },
+    { label: "Categorias cadastradas", value: categoriasUnidade.length },
+  ];
+
+  const salasPorTipo = useMemo(() => {
+    const map = {};
+    areasUnidade.forEach((a) => {
+      const t = (a.tipo && a.tipo.trim()) || "Outro";
+      map[t] = (map[t] || 0) + 1;
+    });
+    // Tipos personalizados (criados em Salas, além dos padrão) ganham cartão
+    // próprio em vez de caírem dentro de "Outro" — ordenados depois dos
+    // padrão, em ordem alfabética.
+    const personalizados = Object.keys(map)
+      .filter((t) => !TIPO_AREA_OPTIONS.includes(t))
+      .sort((a, b) => a.localeCompare(b, "pt-BR"));
+    return [...TIPO_AREA_OPTIONS, ...personalizados].map((t) => ({ tipo: t, value: map[t] || 0 }));
+  }, [areasUnidade]);
+
+  const pieColors = ["#2F6F5E", "#C97A2B", "#B23A32", "#6B7280", "#9CA3AF"];
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: COLORS.ink }}>Painel geral</h2>
+        <div style={{ display: "flex", background: COLORS.paper, borderRadius: 8, padding: 3, alignItems: "center" }}>
+          <button
+            onClick={() => setDashView("geral")}
+            style={{
+              fontSize: 12.5,
+              fontWeight: 600,
+              padding: "7px 10px 7px 14px",
+              borderRadius: 6,
+              cursor: "pointer",
+              color: COLORS.ink,
+              background: dashView === "geral" ? "#fff" : "transparent",
+              border: dashView === "geral" ? `1px solid ${COLORS.line}` : "1px solid transparent",
+            }}
+          >
+            Visão geral
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              marcarPrincipal("geral");
+            }}
+            title={principal === "geral" ? "Visão principal" : "Deixar Visão geral como principal"}
+            style={{ background: "none", border: "none", cursor: "pointer", color: principal === "geral" ? COLORS.accent : COLORS.inkSoft, padding: "4px 8px 4px 2px" }}
+          >
+            <Pin size={13} fill={principal === "geral" ? COLORS.accent : "none"} />
+          </button>
+          <button
+            onClick={() => setDashView("kanban")}
+            style={{
+              fontSize: 12.5,
+              fontWeight: 600,
+              padding: "7px 10px 7px 14px",
+              borderRadius: 6,
+              cursor: "pointer",
+              color: COLORS.ink,
+              background: dashView === "kanban" ? "#fff" : "transparent",
+              border: dashView === "kanban" ? `1px solid ${COLORS.line}` : "1px solid transparent",
+            }}
+          >
+            Kanban
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              marcarPrincipal("kanban");
+            }}
+            title={principal === "kanban" ? "Visão principal" : "Deixar Kanban como principal"}
+            style={{ background: "none", border: "none", cursor: "pointer", color: principal === "kanban" ? COLORS.accent : COLORS.inkSoft, padding: "4px 8px 4px 2px" }}
+          >
+            <Pin size={13} fill={principal === "kanban" ? COLORS.accent : "none"} />
+          </button>
+          <button
+            onClick={() => setDashView("graficos")}
+            style={{
+              fontSize: 12.5,
+              fontWeight: 600,
+              padding: "7px 10px 7px 14px",
+              borderRadius: 6,
+              cursor: "pointer",
+              color: COLORS.ink,
+              background: dashView === "graficos" ? "#fff" : "transparent",
+              border: dashView === "graficos" ? `1px solid ${COLORS.line}` : "1px solid transparent",
+            }}
+          >
+            Gráficos
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              marcarPrincipal("graficos");
+            }}
+            title={principal === "graficos" ? "Visão principal" : "Deixar Gráficos como principal"}
+            style={{ background: "none", border: "none", cursor: "pointer", color: principal === "graficos" ? COLORS.accent : COLORS.inkSoft, padding: "4px 8px 4px 2px" }}
+          >
+            <Pin size={13} fill={principal === "graficos" ? COLORS.accent : "none"} />
+          </button>
+        </div>
+      </div>
+
+      {dashView !== "geral" && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 20 }}>
+          {kpis.map((k) => (
+            <div key={k.label} style={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: "14px 16px" }}>
+              <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginBottom: 6 }}>{k.label}</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.ink }}>{k.value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {dashView === "geral" ? (
+        <>
+          <div className="grid-3" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr)", gap: 16, marginBottom: 16 }}>
+            <Panel title="Saúde do parque" action={<span style={{ fontSize: 11, color: COLORS.inkSoft }}>{total} equipamentos</span>}>
+              <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
+                <div style={{ width: 88, height: 88, borderRadius: "50%", flexShrink: 0, background: statusGradient, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <div style={{ width: 60, height: 60, borderRadius: "50%", background: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: COLORS.ink, lineHeight: 1 }}>{emUsoPct}%</div>
+                    <div style={{ fontSize: 8.5, color: COLORS.inkSoft, marginTop: 2 }}>em uso</div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 7, flex: 1, minWidth: 0 }}>
+                  {porStatus.map((s) => (
+                    <div key={s.name} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: COLORS.inkSoft }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: STATUS_COLORS[s.name], display: "inline-block", flexShrink: 0 }} />
+                      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span>
+                      <span style={{ fontWeight: 700, color: COLORS.ink }}>{s.value}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </Panel>
+
+            <Panel
+              style={{ borderLeft: `3px solid ${COLORS.danger}` }}
+              title={
+                <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                  <TriangleAlert size={15} style={{ color: COLORS.danger }} />
+                  Precisam de atenção
+                </span>
+              }
+              action={<span style={{ fontSize: 20, fontWeight: 700, color: COLORS.danger }}>{precisamAtencao.length}</span>}
+            >
+              {precisamAtencao.length === 0 ? (
+                <EmptyState text="Nenhum equipamento precisa de atenção no momento." />
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+                  {precisamAtencao.slice(0, 3).map((r) => (
+                    <div key={r.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: STATUS_BG[r.status], borderRadius: 7, padding: "7px 10px" }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {r.id} · {r.categoria}
+                        </div>
+                        <div style={{ fontSize: 11, color: COLORS.inkSoft }}>{r.sala || "Sem sala"}</div>
+                      </div>
+                      <StatusPill status={r.status} />
+                    </div>
+                  ))}
+                </div>
+              )}
+              <Button variant="ghost" onClick={() => setView("inventario")}>
+                Ver todos
+              </Button>
+            </Panel>
+
+            <Panel
+              style={{ borderLeft: `3px solid ${COLORS.accent}` }}
+              title={
+                <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                  <MessageSquare size={15} style={{ color: COLORS.accent }} />
+                  Chamados abertos
+                </span>
+              }
+              action={<span style={{ fontSize: 20, fontWeight: 700, color: COLORS.accent }}>{chamadosAbertos.length}</span>}
+            >
+              {chamadosAbertos.length === 0 ? (
+                <EmptyState text="Nenhum chamado em aberto." />
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+                  {chamadosAbertos.slice(0, 3).map((c) => (
+                    <div
+                      key={c.id}
+                      onClick={() => onAbrirChamado(c.id)}
+                      title="Responder no chat"
+                      style={{ background: COLORS.accentSoft, borderRadius: 7, padding: "7px 10px", cursor: "pointer" }}
+                    >
+                      <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.assunto}</div>
+                      <div style={{ fontSize: 11, color: COLORS.inkSoft, marginTop: 1 }}>
+                        {c.solicitante || "Solicitante"} · {c.sala || "Sem sala"} · {tempoDecorrido(c.criadoEm)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <Button variant="ghost" onClick={() => setView("chamados")}>
+                Ver todos
+              </Button>
+            </Panel>
+          </div>
+
+          <div className="grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 16, marginBottom: 16 }}>
+            <StatTile icon={Boxes} value={emEstoque} label="Em estoque" />
+            <StatTile icon={DoorOpen} value={areasUnidade.length} label="Salas cadastradas" />
+            <StatTile icon={Tag} value={categoriasUnidade.length} label="Categorias cadastradas" />
+            <StatTile icon={Clock} value={garantiasVencendo.length} label="Garantias vencendo em 90 dias" accent />
+          </div>
+
+          <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 10 }}>
+            Salas por tipo
+          </div>
+          <div className="grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 16, marginBottom: 16 }}>
+            {salasPorTipo.map((s) => (
+              <StatTile
+                key={s.tipo}
+                emoji={TIPO_AREA_EMOJI[s.tipo] || "🚪"}
+                value={s.value}
+                label={s.tipo}
+                onClick={() => {
+                  onFiltrarTipoArea(s.tipo);
+                  setView("areas");
+                }}
+              />
+            ))}
+          </div>
+
+          <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.3fr) minmax(0, 1fr)", gap: 16, marginBottom: 16 }}>
+            <Panel title="Equipamentos por categoria">
+              <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+                {porCategoria.map((c) => (
+                  <div key={c.name} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ width: 110, flexShrink: 0, fontSize: 12, color: COLORS.inkSoft, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span>
+                    <div style={{ flex: 1, background: COLORS.paper, borderRadius: 4 }}>
+                      <div style={{ width: `${porCategoria[0] && porCategoria[0].value ? (c.value / porCategoria[0].value) * 100 : 0}%`, height: 14, background: COLORS.accent, borderRadius: 4 }} />
+                    </div>
+                    <span style={{ width: 28, textAlign: "right", fontSize: 12, fontWeight: 700, color: COLORS.ink }}>{c.value}</span>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+
+            <Panel title="Top salas com mais equipamentos">
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {porSala.slice(0, 5).map((s, i) => (
+                  <div key={s.name} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span
+                      style={{
+                        width: 20,
+                        height: 20,
+                        borderRadius: "50%",
+                        background: i === 0 ? COLORS.accentSoft : COLORS.paper,
+                        color: i === 0 ? COLORS.accent : COLORS.inkSoft,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {i + 1}
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 3 }}>
+                        <span style={{ color: COLORS.ink, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span>
+                        <span style={{ color: COLORS.ink, fontWeight: 700, flexShrink: 0 }}>{s.value}</span>
+                      </div>
+                      <div style={{ background: COLORS.paper, borderRadius: 3 }}>
+                        <div style={{ width: `${porSala[0] && porSala[0].value ? (s.value / porSala[0].value) * 100 : 0}%`, height: 6, background: "#2F6F5E", borderRadius: 3 }} />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+          </div>
+
+          {garantiasVencendo.length > 0 && (
+            <Panel title="Garantia/vida útil vencendo">
+              <div className="grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
+                {garantiasVencendo.slice(0, 8).map(({ item, dias }) => (
+                  <div key={item.id} style={{ background: dias < 0 || dias <= 30 ? COLORS.dangerSoft : COLORS.accentSoft, borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: COLORS.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {item.categoria} {item.marca ? "· " + item.marca : ""} — {item.id}
+                    </div>
+                    <div style={{ fontSize: 11, color: COLORS.inkSoft, marginTop: 2 }}>{item.sala || "Sem sala"}</div>
+                    <div style={{ fontSize: 10.5, fontWeight: 700, marginTop: 4, color: dias < 0 || dias <= 30 ? COLORS.danger : COLORS.accent }}>
+                      {dias < 0 ? `Vencida há ${Math.abs(dias)} dias` : `Vence em ${dias} dias`}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+          )}
+        </>
+      ) : dashView === "kanban" ? (
+        <>
+          <Panel title="Equipamentos por status" style={{ marginBottom: 16 }}>
+            <EquipamentosKanban
+              inventario={inv}
+              onVerTodos={(status) => {
+                onFiltrarStatus(status);
+                setView("inventario");
+              }}
+            />
+          </Panel>
+          <Panel title="Chamados por status">
+            <ChamadosKanban chamados={(state.chamados || []).filter((c) => unidadeDe(c) === unidadeAtiva)} onSelect={() => setView("chamados")} />
+          </Panel>
+        </>
+      ) : (
+        <>
+      <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginBottom: 16 }}>
+        <Panel title="Equipamentos por categoria">
+          <BarChartHorizontal data={porCategoria} />
+        </Panel>
+
+        <Panel title="Distribuição por status">
+          <DonutChart data={porStatus} colors={STATUS_COLORS} />
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px", marginTop: 4 }}>
+            {porStatus.map((s) => (
+              <div key={s.name} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: COLORS.inkSoft }}>
+                <span style={{ width: 9, height: 9, borderRadius: 2, background: STATUS_COLORS[s.name], display: "inline-block" }} />
+                {s.name} ({s.value})
+              </div>
+            ))}
+          </div>
+        </Panel>
+      </div>
+
+      <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <Panel title="Equipamentos por sala (top 8)">
+          <BarChartHorizontal data={porSala.slice(0, 8).map((s) => ({ name: s.name, value: s.value }))} color={STATUS_COLORS["Em uso"]} />
+          {porSala.length > 8 && (
+            <div style={{ marginTop: 10 }}>
+              <Button variant="ghost" onClick={() => setView("relatorios")}>
+                Ver todas as salas
+              </Button>
+            </div>
+          )}
+        </Panel>
+
+        <Panel
+          title="Precisam de atenção"
+          action={
+            precisamAtencao.length > 0 ? (
+              <span style={{ color: COLORS.danger, display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 600 }}>
+                <TriangleAlert size={14} /> {precisamAtencao.length}
+              </span>
+            ) : null
+          }
+        >
+          {precisamAtencao.length === 0 ? (
+            <EmptyState text="Nenhum equipamento precisa de atenção no momento." />
+          ) : (
+            <div style={{ maxHeight: 280, overflow: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <tbody>
+                  {precisamAtencao.map((r) => (
+                    <tr key={r.id} style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+                      <td style={{ padding: "7px 4px", fontFamily: "ui-monospace, monospace", fontSize: 12, color: COLORS.inkSoft }}>{r.id}</td>
+                      <td style={{ padding: "7px 4px", color: COLORS.ink }}>{r.categoria}</td>
+                      <td style={{ padding: "7px 4px", color: COLORS.inkSoft }}>{r.sala}</td>
+                      <td style={{ padding: "7px 4px", textAlign: "right" }}>
+                        <StatusPill status={r.status} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+      </div>
+
+      {garantiasVencendo.length > 0 && (
+        <Panel title="Garantia/vida útil vencendo" style={{ marginTop: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 260, overflow: "auto" }}>
+            {garantiasVencendo.map(({ item, dias }) => (
+              <div key={item.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: COLORS.paper, borderRadius: 8, padding: "10px 14px" }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.ink }}>
+                    {item.categoria} {item.marca ? "· " + item.marca : ""} — <span style={{ fontFamily: "ui-monospace, monospace", fontWeight: 400 }}>{item.id}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: COLORS.inkSoft, marginTop: 2 }}>{item.sala || "Sem sala"}</div>
+                </div>
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    padding: "3px 10px",
+                    borderRadius: 999,
+                    whiteSpace: "nowrap",
+                    color: dias < 0 || dias <= 30 ? COLORS.danger : COLORS.accent,
+                    background: dias < 0 || dias <= 30 ? COLORS.dangerSoft : COLORS.accentSoft,
+                  }}
+                >
+                  {dias < 0 ? `Vencida há ${Math.abs(dias)} dias` : `Vence em ${dias} dias`}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+      </>
+      )}
+    </div>
+  );
+}
+
+// Rótulo curto só pro cabeçalho da coluna do Kanban — o valor de verdade
+// (usado em filtros, backend etc.) continua sendo o texto completo em
+// STATUS_OPTIONS. Sem isso, "Precisa de manutenção" quebra em 2 linhas e
+// desalinha a altura das colunas em relação às outras.
+const STATUS_LABEL_CURTO = {
+  "Em uso": "Em uso",
+  "Em manutenção": "Em manut.",
+  "Precisa de manutenção": "Precisa manut.",
+  "Em estoque": "Em estoque",
+  "Descartado": "Descartado",
+};
+
+function EquipamentosKanban({ inventario, onVerTodos }) {
+  const colunas = useMemo(() => {
+    const map = {};
+    STATUS_OPTIONS.forEach((s) => (map[s] = []));
+    inventario.forEach((r) => {
+      if (!map[r.status]) map[r.status] = [];
+      map[r.status].push(r);
+    });
+    return STATUS_OPTIONS.map((s) => ({ status: s, itens: map[s] || [] }));
+  }, [inventario]);
+
+  const LIMITE = 40;
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: `repeat(${STATUS_OPTIONS.length}, minmax(0,1fr))`, gap: 12 }}>
+      {colunas.map((col) => (
+        <div key={col.status}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              height: 30,
+              marginBottom: 10,
+              paddingBottom: 8,
+              borderBottom: `2px solid ${STATUS_COLORS[col.status]}`,
+            }}
+          >
+            <span style={{ fontSize: 12.5, fontWeight: 700, color: COLORS.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {STATUS_LABEL_CURTO[col.status] || col.status}
+            </span>
+            <span
+              style={{
+                marginLeft: "auto",
+                flexShrink: 0,
+                fontSize: 10.5,
+                fontWeight: 700,
+                padding: "1px 7px",
+                borderRadius: 999,
+                color: STATUS_COLORS[col.status],
+                background: STATUS_BG[col.status],
+              }}
+            >
+              {col.itens.length}
+            </span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 7, maxHeight: 190, overflow: "auto" }}>
+            {col.itens.length === 0 ? (
+              <div style={{ fontSize: 12, color: COLORS.inkSoft, padding: "8px 2px" }}>—</div>
+            ) : (
+              col.itens.slice(0, LIMITE).map((r) => (
+                <div
+                  key={r.id}
+                  style={{
+                    background: COLORS.surface,
+                    border: `1px solid ${COLORS.line}`,
+                    borderLeft: `3px solid ${STATUS_COLORS[col.status]}`,
+                    borderRadius: 8,
+                    padding: "8px 10px",
+                    boxShadow: "0 1px 2px rgba(22,35,61,0.05)",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 600, color: COLORS.ink }}>
+                    <CategoriaIcon categoria={r.categoria} color={COLORS.accent} />
+                    {r.categoria}
+                  </div>
+                  <div style={{ fontSize: 11, color: COLORS.inkSoft, marginTop: 2 }}>
+                    {r.sala || "Sem sala"} · <span style={{ fontFamily: "ui-monospace, monospace" }}>{r.id}</span>
+                  </div>
+                </div>
+              ))
+            )}
+            {col.itens.length > LIMITE && (
+              <div style={{ fontSize: 11.5, color: COLORS.inkSoft, textAlign: "center", padding: "4px 0" }}>+{col.itens.length - LIMITE} mais</div>
+            )}
+          </div>
+          {onVerTodos && col.itens.length > 0 && (
+            <button
+              onClick={() => onVerTodos(col.status)}
+              style={{
+                width: "100%",
+                marginTop: 8,
+                padding: "7px 4px",
+                fontSize: 11,
+                fontWeight: 700,
+                color: COLORS.ink,
+                background: COLORS.paper,
+                border: "none",
+                borderRadius: 6,
+                cursor: "pointer",
+              }}
+            >
+              Ver todos ({col.itens.length}) →
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------- Inventário ----------
+
+const PAGE_SIZE = 18;
+
+function emptyEquipForm() {
+  return {
+    id: "",
+    categoria: "",
+    marca: "",
+    modelo: "",
+    serie: "",
+    sala: "",
+    status: "Em uso",
+    responsavel: "",
+    observacoes: "",
+    dataCompra: "",
+    valor: "",
+    vidaUtil: "",
+    sistemaOperacional: "",
+    memoriaRam: "",
+    tipoArmazenamento: "",
+    capacidadeArmazenamento: "",
+    historicoManutencao: [],
+    unidade: "colegio",
+  };
+}
+
+// Categorias que têm sistema operacional/memória/armazenamento — os demais
+// tipos de equipamento (projetor, impressora, monitor...) não têm esses
+// campos, então a seção "Especificações técnicas" só aparece pra essas.
+const CATEGORIAS_COM_SPECS = ["notebook", "computador desktop", "mini pc", "tablet"];
+
+function categoriaTemSpecs(categoria) {
+  return CATEGORIAS_COM_SPECS.includes(String(categoria || "").trim().toLowerCase());
+}
+
+function diasParaVencerGarantia(dataCompra, vidaUtilAnos) {
+  if (!dataCompra || !vidaUtilAnos) return null;
+  const anos = parseFloat(vidaUtilAnos);
+  if (!anos || isNaN(anos)) return null;
+  const compra = new Date(dataCompra);
+  if (isNaN(compra.getTime())) return null;
+  const vencimento = new Date(compra);
+  vencimento.setFullYear(vencimento.getFullYear() + Math.floor(anos));
+  vencimento.setDate(vencimento.getDate() + Math.round((anos % 1) * 365));
+  const hoje = new Date();
+  const diffMs = vencimento.getTime() - hoje.getTime();
+  return Math.round(diffMs / (1000 * 60 * 60 * 24));
+}
+
+function EquipForm({ form, setForm, state, isNew, onAddCategoria, podeEditar = true }) {
+  const [novaCategoria, setNovaCategoria] = useState(false);
+  const [novaCategoriaTexto, setNovaCategoriaTexto] = useState("");
+
+  function confirmarNovaCategoria() {
+    const v = novaCategoriaTexto.trim();
+    if (!v) return;
+    onAddCategoria(v);
+    setForm({ ...form, categoria: v });
+    setNovaCategoriaTexto("");
+    setNovaCategoria(false);
+  }
+
+  return (
+    <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 16px" }}>
+      <Field label="Nº de patrimônio">
+        <TextInput value={form.id} disabled={isNew || !podeEditar} onChange={(e) => setForm({ ...form, id: e.target.value })} style={{ fontFamily: "ui-monospace, monospace", background: isNew ? "#F3F2ED" : "#fff" }} />
+      </Field>
+      <Field label="Categoria">
+        {!novaCategoria ? (
+          <div style={{ display: "flex", gap: 6 }}>
+            <Select value={form.categoria} disabled={!podeEditar} onChange={(e) => setForm({ ...form, categoria: e.target.value })} style={{ flex: 1 }}>
+              <option value="">Selecione</option>
+              {state.categorias.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </Select>
+            {podeEditar && (
+              <button
+                type="button"
+                onClick={() => setNovaCategoria(true)}
+                title="Adicionar nova categoria"
+                style={{ background: "#fff", border: `1px solid ${COLORS.lineStrong}`, borderRadius: 6, cursor: "pointer", color: COLORS.ink, width: 36, flexShrink: 0 }}
+              >
+                <Plus size={15} style={{ margin: "0 auto" }} />
+              </button>
+            )}
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 6 }}>
+            <TextInput
+              autoFocus
+              value={novaCategoriaTexto}
+              onChange={(e) => setNovaCategoriaTexto(e.target.value)}
+              placeholder="Nome da nova categoria"
+              onKeyDown={(e) => e.key === "Enter" && confirmarNovaCategoria()}
+              style={{ flex: 1 }}
+            />
+            <button type="button" onClick={confirmarNovaCategoria} title="Confirmar" style={{ background: COLORS.ink, border: "none", borderRadius: 6, cursor: "pointer", color: "#fff", width: 36, flexShrink: 0 }}>
+              <Check size={15} style={{ margin: "0 auto" }} />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setNovaCategoria(false);
+                setNovaCategoriaTexto("");
+              }}
+              title="Cancelar"
+              style={{ background: "#fff", border: `1px solid ${COLORS.lineStrong}`, borderRadius: 6, cursor: "pointer", color: COLORS.inkSoft, width: 36, flexShrink: 0 }}
+            >
+              <X size={15} style={{ margin: "0 auto" }} />
+            </button>
+          </div>
+        )}
+      </Field>
+      <Field label="Marca">
+        <TextInput disabled={!podeEditar} value={form.marca} onChange={(e) => setForm({ ...form, marca: e.target.value })} placeholder="Dell, Epson, Lenovo..." />
+      </Field>
+      <Field label="Modelo">
+        <TextInput disabled={!podeEditar} value={form.modelo} onChange={(e) => setForm({ ...form, modelo: e.target.value })} placeholder="Opcional" />
+      </Field>
+      <Field label="Nº de série">
+        <TextInput disabled={!podeEditar} value={form.serie} onChange={(e) => setForm({ ...form, serie: e.target.value })} placeholder="Opcional" />
+      </Field>
+
+      {categoriaTemSpecs(form.categoria) && (
+        <>
+          <div style={{ gridColumn: "1 / -1", borderTop: `1px solid ${COLORS.line}`, paddingTop: 14, marginTop: 2, marginBottom: 4 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: 0.4 }}>Especificações técnicas</div>
+          </div>
+          <Field label="Sistema operacional">
+            <Select disabled={!podeEditar} value={form.sistemaOperacional} onChange={(e) => setForm({ ...form, sistemaOperacional: e.target.value })}>
+              <option value="">Selecione</option>
+              <option value="Windows 10">Windows 10</option>
+              <option value="Windows 11">Windows 11</option>
+              <option value="macOS">macOS</option>
+              <option value="Linux">Linux</option>
+              <option value="ChromeOS">ChromeOS</option>
+              <option value="Não se aplica">Não se aplica</option>
+            </Select>
+          </Field>
+          <Field label="Memória RAM (GB)">
+            <TextInput disabled={!podeEditar} type="number" value={form.memoriaRam} onChange={(e) => setForm({ ...form, memoriaRam: e.target.value })} placeholder="Ex: 8, 16, 32" />
+          </Field>
+          <Field label="Tipo de armazenamento">
+            <Select disabled={!podeEditar} value={form.tipoArmazenamento} onChange={(e) => setForm({ ...form, tipoArmazenamento: e.target.value })}>
+              <option value="">Selecione</option>
+              <option value="HD (HDD)">HD (HDD)</option>
+              <option value="SSD">SSD</option>
+              <option value="SSD NVMe">SSD NVMe</option>
+              <option value="Não se aplica">Não se aplica</option>
+            </Select>
+          </Field>
+          <Field label="Capacidade (GB)">
+            <TextInput disabled={!podeEditar} type="number" value={form.capacidadeArmazenamento} onChange={(e) => setForm({ ...form, capacidadeArmazenamento: e.target.value })} placeholder="Ex: 256, 512, 1000" />
+          </Field>
+          <div style={{ gridColumn: "1 / -1", borderTop: `1px solid ${COLORS.line}`, marginBottom: 14 }} />
+        </>
+      )}
+
+      <Field label="Sala/Localização">
+        <Select disabled={!podeEditar} value={form.sala} onChange={(e) => setForm({ ...form, sala: e.target.value })}>
+          <option value="">Selecione</option>
+          {state.areas.map((a) => (
+            <option key={a.id} value={a.nome}>
+              {a.nome}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <Field label="Status">
+        <Select disabled={!podeEditar} value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
+          {STATUS_OPTIONS.map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <Field label="Responsável">
+        <Select disabled={!podeEditar} value={form.responsavel} onChange={(e) => setForm({ ...form, responsavel: e.target.value })}>
+          <option value="">Nenhum</option>
+          {state.responsaveis.map((r) => (
+            <option key={r.id} value={r.nome}>
+              {r.nome}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <Field label="Data de compra">
+        <TextInput disabled={!podeEditar} type="date" value={form.dataCompra} onChange={(e) => setForm({ ...form, dataCompra: e.target.value })} />
+      </Field>
+      <Field label="Valor de aquisição (R$)">
+        <TextInput disabled={!podeEditar} type="number" step="0.01" value={form.valor} onChange={(e) => setForm({ ...form, valor: e.target.value })} placeholder="Opcional" />
+      </Field>
+      <Field label="Vida útil estimada (anos)">
+        <TextInput disabled={!podeEditar} type="number" value={form.vidaUtil} onChange={(e) => setForm({ ...form, vidaUtil: e.target.value })} placeholder="Opcional" />
+        {(() => {
+          const dias = diasParaVencerGarantia(form.dataCompra, form.vidaUtil);
+          if (dias === null) return null;
+          const cor = dias < 0 ? COLORS.danger : dias <= 30 ? COLORS.danger : dias <= 90 ? COLORS.accent : COLORS.inkSoft;
+          const texto = dias < 0 ? `Vencida há ${Math.abs(dias)} dia(s)` : `Vence em ${dias} dia(s)`;
+          return <div style={{ fontSize: 11.5, color: cor, marginTop: 4 }}>{texto}</div>;
+        })()}
+      </Field>
+      <div style={{ gridColumn: "1 / -1" }}>
+        <Field label="Observações">
+          <textarea
+            disabled={!podeEditar}
+            value={form.observacoes}
+            onChange={(e) => setForm({ ...form, observacoes: e.target.value })}
+            rows={3}
+            style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }}
+          />
+        </Field>
+      </div>
+      {!isNew && form.historicoManutencao && form.historicoManutencao.length > 0 && (
+        <div style={{ gridColumn: "1 / -1" }}>
+          <div style={{ fontSize: 13, color: COLORS.inkSoft, marginBottom: 6 }}>Histórico de status</div>
+          <div style={{ border: `1px solid ${COLORS.line}`, borderRadius: 6, maxHeight: 140, overflow: "auto" }}>
+            {[...form.historicoManutencao].reverse().map((h, i) => (
+              <div key={i} style={{ padding: "7px 10px", fontSize: 12, color: COLORS.inkSoft, borderBottom: i === form.historicoManutencao.length - 1 ? "none" : `1px solid ${COLORS.line}` }}>
+                {formatDateTime(h.data)} — {h.de} → <strong style={{ color: COLORS.ink }}>{h.para}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Inventario({ state, setState, unidadeAtiva, pendingPatrimonio, onConsumePending, pendingCategoriaFiltro, onConsumeCategoriaFiltro, pendingStatusFiltro, onConsumeStatusFiltro, podeEditar = true }) {
+  const [search, setSearch] = useState("");
+  const [fCategoria, setFCategoria] = useState("");
+  const [fSala, setFSala] = useState("");
+  const [fStatus, setFStatus] = useState("");
+  const [fResp, setFResp] = useState("");
+  const [page, setPage] = useState(1);
+  const [modal, setModal] = useState(null); // { mode: 'new'|'edit', form }
+  const [error, setError] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [selected, setSelected] = useState(() => new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [qrTarget, setQrTarget] = useState(null);
+
+  useEffect(() => {
+    if (!pendingPatrimonio) return;
+    const item = state.inventario.find((r) => r.id === pendingPatrimonio);
+    if (item) {
+      setModal({ mode: "edit", original: item, form: { ...emptyEquipForm(), ...item } });
+    }
+    if (onConsumePending) onConsumePending();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPatrimonio]);
+
+  useEffect(() => {
+    if (pendingCategoriaFiltro === null || pendingCategoriaFiltro === undefined) return;
+    setFCategoria(pendingCategoriaFiltro);
+    setPage(1);
+    if (onConsumeCategoriaFiltro) onConsumeCategoriaFiltro();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingCategoriaFiltro]);
+
+  useEffect(() => {
+    if (pendingStatusFiltro === null || pendingStatusFiltro === undefined) return;
+    setFStatus(pendingStatusFiltro);
+    setPage(1);
+    if (onConsumeStatusFiltro) onConsumeStatusFiltro();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingStatusFiltro]);
+
+  function addCategoria(nome) {
+    setState((prev) =>
+      prev.categorias.some((c) => c.nome.toLowerCase() === nome.toLowerCase() && unidadeDe(c) === unidadeAtiva)
+        ? prev
+        : { ...prev, categorias: [...prev.categorias, { nome, unidade: unidadeAtiva }] }
+    );
+  }
+
+  function toggleSelect(id) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllOnPage(rows) {
+    setSelected((prev) => {
+      const allSelected = rows.length > 0 && rows.every((r) => prev.has(r.id));
+      const next = new Set(prev);
+      if (allSelected) {
+        rows.forEach((r) => next.delete(r.id));
+      } else {
+        rows.forEach((r) => next.add(r.id));
+      }
+      return next;
+    });
+  }
+
+  function bulkDelete() {
+    if (!podeEditar) return;
+    setState((prev) => ({ ...prev, inventario: prev.inventario.filter((r) => !selected.has(r.id)) }));
+    setSelected(new Set());
+    setBulkDeleteOpen(false);
+  }
+
+  const inventarioUnidade = useMemo(() => state.inventario.filter((r) => unidadeDe(r) === unidadeAtiva), [state.inventario, unidadeAtiva]);
+  const categoriasUnidade = useMemo(() => [...nomesCategoriasDaUnidade(state.categorias, unidadeAtiva)].sort((a, b) => a.localeCompare(b, "pt-BR")), [state.categorias, unidadeAtiva]);
+  const areasUnidade = useMemo(() => ordenarPorNome(state.areas.filter((a) => unidadeDe(a) === unidadeAtiva), "nome"), [state.areas, unidadeAtiva]);
+  const responsaveisUnidade = useMemo(() => ordenarPorNome(state.responsaveis.filter((r) => unidadeDe(r) === unidadeAtiva), "nome"), [state.responsaveis, unidadeAtiva]);
+  const stateUnidade = { ...state, categorias: categoriasUnidade, areas: areasUnidade, responsaveis: responsaveisUnidade };
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return inventarioUnidade.filter((r) => {
+      if (fCategoria && r.categoria !== fCategoria) return false;
+      if (fSala && r.sala !== fSala) return false;
+      if (fStatus && r.status !== fStatus) return false;
+      if (fResp && r.responsavel !== fResp) return false;
+      if (!q) return true;
+      return (
+        (r.id || "").toLowerCase().includes(q) ||
+        (r.categoria || "").toLowerCase().includes(q) ||
+        (r.marca || "").toLowerCase().includes(q) ||
+        (r.modelo || "").toLowerCase().includes(q) ||
+        (r.serie || "").toLowerCase().includes(q) ||
+        (r.sala || "").toLowerCase().includes(q) ||
+        (r.responsavel || "").toLowerCase().includes(q)
+      );
+    });
+  }, [inventarioUnidade, search, fCategoria, fSala, fStatus, fResp]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pageSafe = Math.min(page, totalPages);
+  const ordenado = useMemo(() => [...filtered].sort((a, b) => comparaPatrimonio(a.id, b.id)), [filtered]);
+  const pageRows = ordenado.slice((pageSafe - 1) * PAGE_SIZE, pageSafe * PAGE_SIZE);
+
+  function openNew() {
+    if (!podeEditar) return;
+    const form = emptyEquipForm();
+    form.id = nextPatrimonio(state.inventario, state.prefixo);
+    form.unidade = unidadeAtiva;
+    setModal({ mode: "new", form });
+    setError("");
+  }
+
+  function openEdit(row) {
+    setModal({ mode: "edit", original: row, form: { ...emptyEquipForm(), ...row } });
+    setError("");
+  }
+
+  function save() {
+    if (!podeEditar) return;
+    const f = modal.form;
+    if (!f.id.trim()) return setError("Informe o número de patrimônio.");
+    if (!f.categoria) return setError("Selecione uma categoria.");
+    if (!f.sala) return setError("Selecione a sala/localização.");
+    const idOwner = modal.mode === "edit" ? modal.original : null;
+    const idTaken = state.inventario.some((r) => r.id === f.id && r !== idOwner);
+    if (idTaken) return setError("Já existe um equipamento com esse número de patrimônio.");
+
+    let registro = f;
+    if (modal.mode === "edit" && modal.original.status !== f.status) {
+      registro = {
+        ...f,
+        historicoManutencao: [
+          ...(f.historicoManutencao || []),
+          { data: new Date().toISOString(), de: modal.original.status, para: f.status },
+        ],
+      };
+    }
+
+    setState((prev) => {
+      let inventario;
+      if (modal.mode === "new") {
+        inventario = [...prev.inventario, registro];
+      } else {
+        inventario = prev.inventario.map((r) => (r === modal.original ? registro : r));
+      }
+      return { ...prev, inventario };
+    });
+    setModal(null);
+  }
+
+  function remove(row) {
+    if (!podeEditar) return;
+    setState((prev) => ({ ...prev, inventario: prev.inventario.filter((r) => r !== row) }));
+    setDeleteTarget(null);
+    setModal(null);
+  }
+
+  const activeFilters = fCategoria || fSala || fStatus || fResp || search;
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: COLORS.ink }}>Inventário</h2>
+        {podeEditar && (
+          <Button variant="primary" icon={Plus} onClick={openNew}>
+            Novo equipamento
+          </Button>
+        )}
+      </div>
+
+      <Panel style={{ marginBottom: 14 }}>
+        <div className="grid-5" style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr 1fr", gap: 10 }}>
+          <div style={{ position: "relative" }}>
+            <Search size={15} style={{ position: "absolute", left: 10, top: 10, color: COLORS.inkSoft }} />
+            <TextInput
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
+              placeholder="Buscar por patrimônio, marca, sala..."
+              style={{ paddingLeft: 32 }}
+            />
+          </div>
+          <Select
+            value={fCategoria}
+            onChange={(e) => {
+              setFCategoria(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">Todas categorias</option>
+            {categoriasUnidade.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </Select>
+          <Select
+            value={fSala}
+            onChange={(e) => {
+              setFSala(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">Todas salas</option>
+            {areasUnidade.map((a) => (
+              <option key={a.id} value={a.nome}>
+                {a.nome}
+              </option>
+            ))}
+          </Select>
+          <Select
+            value={fStatus}
+            onChange={(e) => {
+              setFStatus(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">Todos status</option>
+            {STATUS_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </Select>
+          <Select
+            value={fResp}
+            onChange={(e) => {
+              setFResp(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">Todos responsáveis</option>
+            {responsaveisUnidade.map((r) => (
+              <option key={r.id} value={r.nome}>
+                {r.nome}
+              </option>
+            ))}
+          </Select>
+        </div>
+        {activeFilters ? (
+          <div style={{ marginTop: 10 }}>
+            <button
+              onClick={() => {
+                setSearch("");
+                setFCategoria("");
+                setFSala("");
+                setFStatus("");
+                setFResp("");
+                setPage(1);
+              }}
+              style={{ background: "none", border: "none", color: COLORS.accent, fontSize: 12.5, cursor: "pointer", padding: 0, fontWeight: 600 }}
+            >
+              Limpar filtros
+            </button>
+          </div>
+        ) : null}
+      </Panel>
+
+      <Panel>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+          <div style={{ fontSize: 12.5, color: COLORS.inkSoft }}>
+            {filtered.length} equipamento{filtered.length !== 1 ? "s" : ""} encontrado{filtered.length !== 1 ? "s" : ""}
+          </div>
+          {selected.size > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 12.5, color: COLORS.ink, fontWeight: 600 }}>{selected.size} selecionado{selected.size !== 1 ? "s" : ""}</span>
+              <button
+                onClick={() => setSelected(new Set())}
+                style={{ background: "none", border: "none", color: COLORS.inkSoft, fontSize: 12.5, cursor: "pointer", padding: 0 }}
+              >
+                Limpar
+              </button>
+              {podeEditar && (
+                <Button variant="danger" icon={Trash2} onClick={() => setBulkDeleteOpen(true)}>
+                  Excluir selecionados
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${COLORS.lineStrong}` }}>
+                <th style={{ padding: "8px 6px", width: 28 }}>
+                  <input
+                    type="checkbox"
+                    checked={pageRows.length > 0 && pageRows.every((r) => selected.has(r.id))}
+                    onChange={() => toggleSelectAllOnPage(pageRows)}
+                    style={{ cursor: "pointer" }}
+                  />
+                </th>
+                {["Patrimônio", "Categoria", "Marca / Modelo", "Sala", "Status", "Responsável"].map((h) => (
+                  <th key={h} style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontWeight: 600, fontSize: 12 }}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {pageRows.map((r) => (
+                <tr
+                  key={r.id}
+                  onClick={() => openEdit(r)}
+                  style={{ borderBottom: `1px solid ${COLORS.line}`, background: selected.has(r.id) ? COLORS.accentSoft : "transparent", cursor: "pointer" }}
+                  onMouseEnter={(e) => {
+                    if (!selected.has(r.id)) e.currentTarget.style.background = COLORS.paper;
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!selected.has(r.id)) e.currentTarget.style.background = "transparent";
+                  }}
+                >
+                  <td style={{ padding: "9px 6px" }} onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={selected.has(r.id)} onChange={() => toggleSelect(r.id)} style={{ cursor: "pointer" }} />
+                  </td>
+                  <td style={{ padding: "9px 6px", fontFamily: "ui-monospace, monospace", fontSize: 12.5, color: COLORS.ink }}>{r.id}</td>
+                  <td style={{ padding: "9px 6px", color: COLORS.ink }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <CategoriaIcon categoria={r.categoria} color={COLORS.inkSoft} />
+                      {r.categoria}
+                    </div>
+                  </td>
+                  <td style={{ padding: "9px 6px", color: COLORS.inkSoft }}>
+                    {r.marca}
+                    {r.modelo ? " · " + r.modelo : ""}
+                  </td>
+                  <td style={{ padding: "9px 6px", color: COLORS.inkSoft }}>{r.sala}</td>
+                  <td style={{ padding: "9px 6px" }}>
+                    <StatusPill status={r.status} />
+                  </td>
+                  <td style={{ padding: "9px 6px", color: COLORS.inkSoft }}>{r.responsavel || "—"}</td>
+                </tr>
+              ))}
+              {pageRows.length === 0 && (
+                <tr>
+                  <td colSpan={7}>
+                    <EmptyState text="Nenhum equipamento encontrado com esses filtros." />
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {totalPages > 1 && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 14, marginTop: 16 }}>
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={pageSafe === 1}
+              style={{ background: "none", border: "none", cursor: pageSafe === 1 ? "default" : "pointer", color: pageSafe === 1 ? COLORS.line : COLORS.ink }}
+            >
+              <ChevronLeft size={18} />
+            </button>
+            <span style={{ fontSize: 13, color: COLORS.inkSoft }}>
+              Página {pageSafe} de {totalPages}
+            </span>
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={pageSafe === totalPages}
+              style={{ background: "none", border: "none", cursor: pageSafe === totalPages ? "default" : "pointer", color: pageSafe === totalPages ? COLORS.line : COLORS.ink }}
+            >
+              <ChevronRight size={18} />
+            </button>
+          </div>
+        )}
+      </Panel>
+
+      {modal && (
+        <Modal title={modal.mode === "new" ? "Novo equipamento" : podeEditar ? "Editar equipamento" : "Equipamento"} onClose={() => setModal(null)} width={620}>
+          <EquipForm form={modal.form} setForm={(f) => setModal({ ...modal, form: f })} state={stateUnidade} isNew={modal.mode === "new"} onAddCategoria={addCategoria} podeEditar={podeEditar} />
+          {error && <div style={{ color: COLORS.danger, fontSize: 13, marginBottom: 10 }}>{error}</div>}
+          <div style={{ borderTop: `1px solid ${COLORS.line}`, marginTop: 4, paddingTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            {modal.mode === "edit" && podeEditar ? (
+              <Button variant="danger" icon={Trash2} onClick={() => setDeleteTarget(modal.original)}>
+                Excluir
+              </Button>
+            ) : (
+              <span />
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              {modal.mode === "edit" && (
+                <Button variant="ghost" icon={QrCode} onClick={() => setQrTarget(modal.original)}>
+                  Gerar QR Code
+                </Button>
+              )}
+              <Button variant="ghost" onClick={() => setModal(null)}>
+                {podeEditar ? "Cancelar" : "Fechar"}
+              </Button>
+              {podeEditar && (
+                <Button variant="primary" icon={Check} onClick={save}>
+                  Salvar
+                </Button>
+              )}
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {deleteTarget && (
+        <Modal title="Excluir equipamento" onClose={() => setDeleteTarget(null)} width={380}>
+          <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+            Tem certeza que deseja excluir o equipamento <strong style={{ fontFamily: "ui-monospace, monospace" }}>{deleteTarget.id}</strong> ({deleteTarget.categoria})? Essa ação não pode ser desfeita.
+          </p>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button variant="ghost" onClick={() => setDeleteTarget(null)}>
+              Cancelar
+            </Button>
+            <Button variant="danger" icon={Trash2} onClick={() => remove(deleteTarget)}>
+              Excluir
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {bulkDeleteOpen && (
+        <Modal title="Excluir equipamentos selecionados" onClose={() => setBulkDeleteOpen(false)} width={380}>
+          <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+            Tem certeza que deseja excluir <strong>{selected.size}</strong> equipamento{selected.size !== 1 ? "s" : ""} selecionado{selected.size !== 1 ? "s" : ""}? Essa ação não pode ser desfeita.
+          </p>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button variant="ghost" onClick={() => setBulkDeleteOpen(false)}>
+              Cancelar
+            </Button>
+            <Button variant="danger" icon={Trash2} onClick={bulkDelete}>
+              Excluir {selected.size}
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {qrTarget && (
+        <Modal title="QR Code do equipamento" onClose={() => setQrTarget(null)} width={340}>
+          {(() => {
+            const url = typeof window !== "undefined"
+              ? window.location.origin + window.location.pathname + "?patrimonio=" + encodeURIComponent(qrTarget.id)
+              : "";
+            const qrImg = "https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=" + encodeURIComponent(url);
+            return (
+              <div style={{ textAlign: "center" }}>
+                <img src={qrImg} alt={"QR Code " + qrTarget.id} width={220} height={220} style={{ borderRadius: 8, border: `1px solid ${COLORS.line}` }} />
+                <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.ink, marginTop: 12, fontFamily: "ui-monospace, monospace" }}>{qrTarget.id}</div>
+                <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginTop: 2 }}>
+                  {qrTarget.categoria} {qrTarget.marca ? "· " + qrTarget.marca : ""} — {qrTarget.sala || "Sem sala"}
+                </div>
+                <p style={{ fontSize: 11.5, color: COLORS.inkSoft, marginTop: 10 }}>
+                  Cole esse código no equipamento. Ao escanear com a câmera do celular durante um levantamento, abre direto o cadastro dele aqui no app.
+                </p>
+                <a href={qrImg} target="_blank" rel="noreferrer" style={{ display: "inline-block", marginTop: 6 }}>
+                  <Button variant="accent" icon={Download}>
+                    Baixar QR Code
+                  </Button>
+                </a>
+              </div>
+            );
+          })()}
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ---------- Categorias ----------
+
+function Categorias({ state, setState, unidadeAtiva, podeEditar = true }) {
+  const [novo, setNovo] = useState("");
+  const [error, setError] = useState("");
+  const [removeTarget, setRemoveTarget] = useState(null);
+  const [editModal, setEditModal] = useState(null);
+  const [editError, setEditError] = useState("");
+
+  const categoriasUnidade = useMemo(() => ordenarPorNome(state.categorias.filter((c) => unidadeDe(c) === unidadeAtiva), "nome"), [state.categorias, unidadeAtiva]);
+
+  const counts = useMemo(() => {
+    const map = {};
+    state.inventario.forEach((r) => {
+      if (unidadeDe(r) === unidadeAtiva) map[r.categoria] = (map[r.categoria] || 0) + 1;
+    });
+    return map;
+  }, [state.inventario, unidadeAtiva]);
+
+  function add() {
+    if (!podeEditar) return;
+    const v = novo.trim();
+    if (!v) return;
+    if (categoriasUnidade.some((c) => c.nome.toLowerCase() === v.toLowerCase())) {
+      setError("Essa categoria já existe nessa unidade.");
+      return;
+    }
+    setState((prev) => ({ ...prev, categorias: [...prev.categorias, { nome: v, unidade: unidadeAtiva }] }));
+    setNovo("");
+    setError("");
+  }
+
+  function remove(catObj) {
+    if (!podeEditar) return;
+    setState((prev) => ({ ...prev, categorias: prev.categorias.filter((c) => c !== catObj) }));
+    setRemoveTarget(null);
+  }
+
+  function openEdit(catObj) {
+    if (!podeEditar) return;
+    setEditModal({ original: catObj, nome: catObj.nome });
+    setEditError("");
+  }
+
+  function saveEdit() {
+    if (!podeEditar) return;
+    const novoNome = editModal.nome.trim();
+    if (!novoNome) return setEditError("Informe o nome da categoria.");
+    const dup = categoriasUnidade.some((c) => c !== editModal.original && c.nome.toLowerCase() === novoNome.toLowerCase());
+    if (dup) return setEditError("Já existe uma categoria com esse nome nessa unidade.");
+    const nomeAntigo = editModal.original.nome;
+    setState((prev) => ({
+      ...prev,
+      categorias: prev.categorias.map((c) => (c === editModal.original ? { ...c, nome: novoNome } : c)),
+      inventario: prev.inventario.map((r) => (r.categoria === nomeAntigo && unidadeDe(r) === unidadeAtiva ? { ...r, categoria: novoNome } : r)),
+    }));
+    setEditModal(null);
+  }
+
+  return (
+    <div>
+      <h2 style={{ margin: "0 0 18px 0", fontSize: 20, fontWeight: 700, color: COLORS.ink }}>Categorias de equipamento</h2>
+
+      {podeEditar && (
+        <Panel style={{ marginBottom: 14 }}>
+          <div style={{ display: "flex", gap: 10 }}>
+            <TextInput
+              value={novo}
+              onChange={(e) => {
+                setNovo(e.target.value);
+                setError("");
+              }}
+              placeholder="Nome da nova categoria"
+              onKeyDown={(e) => e.key === "Enter" && add()}
+            />
+            <Button variant="primary" icon={Plus} onClick={add}>
+              Adicionar
+            </Button>
+          </div>
+          {error && <div style={{ color: COLORS.danger, fontSize: 13, marginTop: 8 }}>{error}</div>}
+        </Panel>
+      )}
+
+      <Panel>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${COLORS.lineStrong}` }}>
+              <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Categoria</th>
+              <th style={{ textAlign: "right", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Equipamentos</th>
+              <th style={{ padding: "8px 6px" }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {categoriasUnidade.map((c) => (
+              <tr key={c.nome} style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+                <td style={{ padding: "9px 6px", color: COLORS.ink }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <CategoriaIcon categoria={c.nome} color={COLORS.accent} />
+                    {c.nome}
+                  </div>
+                </td>
+                <td style={{ padding: "9px 6px", textAlign: "right", color: COLORS.inkSoft }}>{counts[c.nome] || 0}</td>
+                <td style={{ padding: "9px 6px", textAlign: "right", whiteSpace: "nowrap" }}>
+                  {podeEditar && (
+                    <>
+                      <button onClick={() => openEdit(c)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.inkSoft, padding: 4 }} aria-label="Editar">
+                        <Pencil size={15} />
+                      </button>
+                      <button onClick={() => setRemoveTarget(c)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.danger, padding: 4 }} aria-label="Excluir">
+                        <Trash2 size={15} />
+                      </button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Panel>
+
+      {editModal && (
+        <Modal title="Editar categoria" onClose={() => setEditModal(null)} width={380}>
+          <Field label="Nome">
+            <TextInput
+              autoFocus
+              value={editModal.nome}
+              onChange={(e) => setEditModal({ ...editModal, nome: e.target.value })}
+              onKeyDown={(e) => e.key === "Enter" && saveEdit()}
+            />
+          </Field>
+          {counts[editModal.original.nome] > 0 && (
+            <p style={{ fontSize: 12.5, color: COLORS.inkSoft, marginTop: -6 }}>
+              Isso vai atualizar os {counts[editModal.original.nome]} equipamento(s) que usam essa categoria.
+            </p>
+          )}
+          {editError && <div style={{ color: COLORS.danger, fontSize: 13, marginBottom: 10 }}>{editError}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
+            <Button variant="ghost" onClick={() => setEditModal(null)}>
+              Cancelar
+            </Button>
+            <Button variant="primary" icon={Check} onClick={saveEdit}>
+              Salvar
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {removeTarget && (
+        <Modal title="Excluir categoria" onClose={() => setRemoveTarget(null)} width={380}>
+          {counts[removeTarget.nome] > 0 ? (
+            <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+              Essa categoria está em uso por <strong>{counts[removeTarget.nome]}</strong> equipamento(s). Reatribua-os antes de excluí-la, ou a categoria continuará aparecendo nos registros existentes.
+            </p>
+          ) : (
+            <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+              Tem certeza que deseja excluir a categoria <strong>{removeTarget.nome}</strong>?
+            </p>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button variant="ghost" onClick={() => setRemoveTarget(null)}>
+              Cancelar
+            </Button>
+            <Button variant="danger" icon={Trash2} onClick={() => remove(removeTarget)}>
+              Excluir mesmo assim
+            </Button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ---------- Áreas / Salas ----------
+
+
+function Areas({ state, setState, unidadeAtiva, podeEditar = true, pendingTipoFiltro, onConsumeTipoFiltro }) {
+  const [modal, setModal] = useState(null);
+  const [removeTarget, setRemoveTarget] = useState(null);
+  const [error, setError] = useState("");
+  const [viewing, setViewing] = useState(null);
+  const [novoTipo, setNovoTipo] = useState(false);
+  const [novoTipoTexto, setNovoTipoTexto] = useState("");
+  const [fTipo, setFTipo] = useState("");
+
+  useEffect(() => {
+    if (pendingTipoFiltro === null || pendingTipoFiltro === undefined) return;
+    setFTipo(pendingTipoFiltro);
+    if (onConsumeTipoFiltro) onConsumeTipoFiltro();
+  }, [pendingTipoFiltro]);
+
+  const areasUnidade = useMemo(() => ordenarPorNome(state.areas.filter((a) => unidadeDe(a) === unidadeAtiva), "nome"), [state.areas, unidadeAtiva]);
+  const areasFiltradas = useMemo(
+    () => (fTipo ? areasUnidade.filter((a) => ((a.tipo && a.tipo.trim()) || "Outro") === fTipo) : areasUnidade),
+    [areasUnidade, fTipo]
+  );
+
+  // Tipos personalizados já usados em qualquer unidade, além dos padrão —
+  // assim, uma vez criado, um tipo novo fica disponível pra escolher de novo
+  // sem precisar redigitar.
+  const tiposDisponiveis = useMemo(() => {
+    const customizados = [...new Set(state.areas.map((a) => a.tipo).filter((t) => t && !TIPO_AREA_OPTIONS.includes(t)))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+    return [...TIPO_AREA_OPTIONS, ...customizados];
+  }, [state.areas]);
+
+  // Inclui o tipo recém-digitado no modal (ainda não salvo, então não está em
+  // state.areas nem em tiposDisponiveis) pra ele aparecer selecionado no
+  // <select> assim que o usuário confirma, sem precisar salvar primeiro.
+  const opcoesTipo = useMemo(() => {
+    const tipoAtual = modal && modal.form.tipo;
+    return tipoAtual && !tiposDisponiveis.includes(tipoAtual) ? [...tiposDisponiveis, tipoAtual] : tiposDisponiveis;
+  }, [tiposDisponiveis, modal]);
+
+  function confirmarNovoTipo() {
+    const v = novoTipoTexto.trim();
+    if (!v) return;
+    setModal((prev) => ({ ...prev, form: { ...prev.form, tipo: v } }));
+    setNovoTipoTexto("");
+    setNovoTipo(false);
+  }
+
+  const equipDaSala = useMemo(() => {
+    if (!viewing) return [];
+    return state.inventario.filter((r) => r.sala === viewing.nome && unidadeDe(r) === unidadeAtiva);
+  }, [state.inventario, viewing, unidadeAtiva]);
+
+  const counts = useMemo(() => {
+    const map = {};
+    state.inventario.forEach((r) => {
+      if (unidadeDe(r) === unidadeAtiva) map[r.sala] = (map[r.sala] || 0) + 1;
+    });
+    return map;
+  }, [state.inventario, unidadeAtiva]);
+
+  function openNew() {
+    if (!podeEditar) return;
+    setModal({ mode: "new", form: { id: uid("AR"), nome: "", tipo: "Sala de aula", unidade: unidadeAtiva } });
+    setError("");
+    setNovoTipo(false);
+    setNovoTipoTexto("");
+  }
+  function openEdit(a) {
+    if (!podeEditar) return;
+    setModal({ mode: "edit", form: { ...a } });
+    setError("");
+    setNovoTipo(false);
+    setNovoTipoTexto("");
+  }
+  function save() {
+    if (!podeEditar) return;
+    const f = modal.form;
+    if (!f.nome.trim()) return setError("Informe o nome da sala/área.");
+    const dupNome = areasUnidade.some((a) => a.id !== f.id && a.nome.toLowerCase() === f.nome.trim().toLowerCase());
+    if (dupNome) return setError("Já existe uma sala/área com esse nome nessa unidade.");
+    setState((prev) => {
+      const exists = prev.areas.some((a) => a.id === f.id);
+      const areas = exists ? prev.areas.map((a) => (a.id === f.id ? f : a)) : [...prev.areas, f];
+      let inventario = prev.inventario;
+      if (exists) {
+        const old = prev.areas.find((a) => a.id === f.id);
+        if (old && old.nome !== f.nome) {
+          inventario = prev.inventario.map((r) => (r.sala === old.nome && unidadeDe(r) === unidadeAtiva ? { ...r, sala: f.nome } : r));
+        }
+      }
+      return { ...prev, areas, inventario };
+    });
+    setModal(null);
+  }
+  function remove(a) {
+    if (!podeEditar) return;
+    setState((prev) => ({ ...prev, areas: prev.areas.filter((x) => x.id !== a.id) }));
+    setRemoveTarget(null);
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: COLORS.ink }}>Salas e áreas</h2>
+        {podeEditar && (
+          <Button variant="primary" icon={Plus} onClick={openNew}>
+            Nova sala/área
+          </Button>
+        )}
+      </div>
+
+      {fTipo && (
+        <div style={{ marginBottom: 14 }}>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              background: COLORS.accentSoft,
+              color: COLORS.accent,
+              fontSize: 12,
+              fontWeight: 700,
+              padding: "6px 12px",
+              borderRadius: 999,
+            }}
+          >
+            {TIPO_AREA_EMOJI[fTipo] || "🚪"} Filtrado por: {fTipo}
+            <span onClick={() => setFTipo("")} style={{ cursor: "pointer", opacity: 0.75, fontWeight: 900, lineHeight: 1 }}>
+              ✕
+            </span>
+          </span>
+        </div>
+      )}
+
+      <Panel>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${COLORS.lineStrong}` }}>
+              <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Nome</th>
+              <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Tipo</th>
+              <th style={{ textAlign: "right", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Equipamentos</th>
+              <th style={{ padding: "8px 6px" }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {areasFiltradas.map((a) => (
+              <tr
+                key={a.id}
+                onClick={() => setViewing(a)}
+                style={{ borderBottom: `1px solid ${COLORS.line}`, cursor: "pointer" }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = COLORS.paper)}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              >
+                <td style={{ padding: "9px 6px", color: COLORS.ink, fontWeight: 600 }}>{a.nome}</td>
+                <td style={{ padding: "9px 6px", color: COLORS.inkSoft }}>{a.tipo}</td>
+                <td style={{ padding: "9px 6px", textAlign: "right", color: COLORS.inkSoft }}>{counts[a.nome] || 0}</td>
+                <td style={{ padding: "9px 6px", textAlign: "right", whiteSpace: "nowrap" }}>
+                  {podeEditar && (
+                    <>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openEdit(a);
+                        }}
+                        style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.inkSoft, padding: 4 }}
+                        aria-label="Editar"
+                      >
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRemoveTarget(a);
+                        }}
+                        style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.danger, padding: 4 }}
+                        aria-label="Excluir"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Panel>
+
+      {modal && (
+        <Modal title={modal.mode === "new" ? "Nova sala/área" : "Editar sala/área"} onClose={() => setModal(null)}>
+          <Field label="Nome">
+            <TextInput value={modal.form.nome} onChange={(e) => setModal({ ...modal, form: { ...modal.form, nome: e.target.value } })} placeholder="Ex: Sala 103, Biblioteca..." />
+          </Field>
+          <Field label="Tipo de ambiente">
+            {!novoTipo ? (
+              <div style={{ display: "flex", gap: 6 }}>
+                <Select value={modal.form.tipo} onChange={(e) => setModal({ ...modal, form: { ...modal.form, tipo: e.target.value } })} style={{ flex: 1 }}>
+                  {opcoesTipo.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </Select>
+                <button
+                  type="button"
+                  onClick={() => setNovoTipo(true)}
+                  title="Adicionar novo tipo de ambiente"
+                  style={{ background: "#fff", border: `1px solid ${COLORS.lineStrong}`, borderRadius: 6, cursor: "pointer", color: COLORS.ink, width: 36, flexShrink: 0 }}
+                >
+                  <Plus size={15} style={{ margin: "0 auto" }} />
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 6 }}>
+                <TextInput
+                  autoFocus
+                  value={novoTipoTexto}
+                  onChange={(e) => setNovoTipoTexto(e.target.value)}
+                  placeholder="Nome do novo tipo"
+                  onKeyDown={(e) => e.key === "Enter" && confirmarNovoTipo()}
+                  style={{ flex: 1 }}
+                />
+                <button type="button" onClick={confirmarNovoTipo} title="Confirmar" style={{ background: COLORS.ink, border: "none", borderRadius: 6, cursor: "pointer", color: "#fff", width: 36, flexShrink: 0 }}>
+                  <Check size={15} style={{ margin: "0 auto" }} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNovoTipo(false);
+                    setNovoTipoTexto("");
+                  }}
+                  title="Cancelar"
+                  style={{ background: "#fff", border: `1px solid ${COLORS.lineStrong}`, borderRadius: 6, cursor: "pointer", color: COLORS.inkSoft, width: 36, flexShrink: 0 }}
+                >
+                  <X size={15} style={{ margin: "0 auto" }} />
+                </button>
+              </div>
+            )}
+          </Field>
+          {error && <div style={{ color: COLORS.danger, fontSize: 13, marginBottom: 10 }}>{error}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
+            <Button variant="ghost" onClick={() => setModal(null)}>
+              Cancelar
+            </Button>
+            <Button variant="primary" icon={Check} onClick={save}>
+              Salvar
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {removeTarget && (
+        <Modal title="Excluir sala/área" onClose={() => setRemoveTarget(null)} width={380}>
+          {counts[removeTarget.nome] > 0 ? (
+            <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+              Essa sala tem <strong>{counts[removeTarget.nome]}</strong> equipamento(s) associado(s). Eles continuarão com essa localização registrada mesmo após a exclusão do cadastro.
+            </p>
+          ) : (
+            <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+              Tem certeza que deseja excluir <strong>{removeTarget.nome}</strong>?
+            </p>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button variant="ghost" onClick={() => setRemoveTarget(null)}>
+              Cancelar
+            </Button>
+            <Button variant="danger" icon={Trash2} onClick={() => remove(removeTarget)}>
+              Excluir mesmo assim
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {viewing && (
+        <Modal title={`Equipamentos em ${viewing.nome}`} onClose={() => setViewing(null)} width={640}>
+          {equipDaSala.length === 0 ? (
+            <EmptyState text="Nenhum equipamento cadastrado nessa sala ainda." />
+          ) : (
+            <div style={{ maxHeight: "55vh", overflow: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${COLORS.lineStrong}` }}>
+                    {["Patrimônio", "Categoria", "Marca / Modelo", "Status", "Responsável"].map((h) => (
+                      <th key={h} style={{ textAlign: "left", padding: "7px 5px", color: COLORS.inkSoft, fontSize: 11.5, position: "sticky", top: 0, background: "#fff" }}>
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {equipDaSala.map((r) => (
+                    <tr key={r.id} style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+                      <td style={{ padding: "7px 5px", fontFamily: "ui-monospace, monospace", fontSize: 12 }}>{r.id}</td>
+                      <td style={{ padding: "7px 5px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <CategoriaIcon categoria={r.categoria} color={COLORS.inkSoft} size={13} />
+                          {r.categoria}
+                        </div>
+                      </td>
+                      <td style={{ padding: "7px 5px", color: COLORS.inkSoft }}>
+                        {r.marca}
+                        {r.modelo ? " · " + r.modelo : ""}
+                      </td>
+                      <td style={{ padding: "7px 5px" }}>
+                        <StatusPill status={r.status} />
+                      </td>
+                      <td style={{ padding: "7px 5px", color: COLORS.inkSoft }}>{r.responsavel || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
+            <Button variant="ghost" onClick={() => setViewing(null)}>
+              Fechar
+            </Button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ---------- Responsáveis ----------
+
+function Responsaveis({ state, setState, unidadeAtiva, podeEditar = true }) {
+  const [modal, setModal] = useState(null);
+  const [removeTarget, setRemoveTarget] = useState(null);
+  const [error, setError] = useState("");
+
+  const responsaveisUnidade = useMemo(() => ordenarPorNome(state.responsaveis.filter((r) => unidadeDe(r) === unidadeAtiva), "nome"), [state.responsaveis, unidadeAtiva]);
+
+  const counts = useMemo(() => {
+    const map = {};
+    state.inventario.forEach((r) => {
+      if (r.responsavel && unidadeDe(r) === unidadeAtiva) map[r.responsavel] = (map[r.responsavel] || 0) + 1;
+    });
+    return map;
+  }, [state.inventario, unidadeAtiva]);
+
+  function openNew() {
+    if (!podeEditar) return;
+    setModal({ mode: "new", form: { id: uid("RE"), nome: "", cargo: "", contato: "", unidade: unidadeAtiva } });
+    setError("");
+  }
+  function openEdit(r) {
+    if (!podeEditar) return;
+    setModal({ mode: "edit", form: { ...r } });
+    setError("");
+  }
+  function save() {
+    if (!podeEditar) return;
+    const f = modal.form;
+    if (!f.nome.trim()) return setError("Informe o nome do responsável.");
+    setState((prev) => {
+      const exists = prev.responsaveis.some((r) => r.id === f.id);
+      const responsaveis = exists ? prev.responsaveis.map((r) => (r.id === f.id ? f : r)) : [...prev.responsaveis, f];
+      let inventario = prev.inventario;
+      if (exists) {
+        const old = prev.responsaveis.find((r) => r.id === f.id);
+        if (old && old.nome !== f.nome) {
+          inventario = prev.inventario.map((r) => (r.responsavel === old.nome && unidadeDe(r) === unidadeAtiva ? { ...r, responsavel: f.nome } : r));
+        }
+      }
+      return { ...prev, responsaveis, inventario };
+    });
+    setModal(null);
+  }
+  function remove(r) {
+    if (!podeEditar) return;
+    setState((prev) => ({ ...prev, responsaveis: prev.responsaveis.filter((x) => x.id !== r.id) }));
+    setRemoveTarget(null);
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: COLORS.ink }}>Responsáveis</h2>
+        {podeEditar && (
+          <Button variant="primary" icon={Plus} onClick={openNew}>
+            Novo responsável
+          </Button>
+        )}
+      </div>
+
+      <Panel>
+        {responsaveisUnidade.length === 0 ? (
+          <EmptyState text="Nenhum responsável cadastrado ainda." />
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${COLORS.lineStrong}` }}>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Nome</th>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Cargo/setor</th>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Contato</th>
+                <th style={{ textAlign: "right", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Equipamentos</th>
+                <th style={{ padding: "8px 6px" }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {responsaveisUnidade.map((r) => (
+                <tr key={r.id} style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+                  <td style={{ padding: "9px 6px", color: COLORS.ink }}>{r.nome}</td>
+                  <td style={{ padding: "9px 6px", color: COLORS.inkSoft }}>{r.cargo}</td>
+                  <td style={{ padding: "9px 6px", color: COLORS.inkSoft }}>{r.contato}</td>
+                  <td style={{ padding: "9px 6px", textAlign: "right", color: COLORS.inkSoft }}>{counts[r.nome] || 0}</td>
+                  <td style={{ padding: "9px 6px", textAlign: "right", whiteSpace: "nowrap" }}>
+                    {podeEditar && (
+                      <>
+                        <button onClick={() => openEdit(r)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.inkSoft, padding: 4 }} aria-label="Editar">
+                          <Pencil size={15} />
+                        </button>
+                        <button onClick={() => setRemoveTarget(r)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.danger, padding: 4 }} aria-label="Excluir">
+                          <Trash2 size={15} />
+                        </button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+
+      {modal && (
+        <Modal title={modal.mode === "new" ? "Novo responsável" : "Editar responsável"} onClose={() => setModal(null)}>
+          <Field label="Nome">
+            <TextInput value={modal.form.nome} onChange={(e) => setModal({ ...modal, form: { ...modal.form, nome: e.target.value } })} />
+          </Field>
+          <Field label="Cargo/setor">
+            <TextInput value={modal.form.cargo} onChange={(e) => setModal({ ...modal, form: { ...modal.form, cargo: e.target.value } })} placeholder="Ex: Coordenação, Secretaria..." />
+          </Field>
+          <Field label="Contato">
+            <TextInput value={modal.form.contato} onChange={(e) => setModal({ ...modal, form: { ...modal.form, contato: e.target.value } })} placeholder="Telefone ou e-mail" />
+          </Field>
+          {error && <div style={{ color: COLORS.danger, fontSize: 13, marginBottom: 10 }}>{error}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
+            <Button variant="ghost" onClick={() => setModal(null)}>
+              Cancelar
+            </Button>
+            <Button variant="primary" icon={Check} onClick={save}>
+              Salvar
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {removeTarget && (
+        <Modal title="Excluir responsável" onClose={() => setRemoveTarget(null)} width={380}>
+          <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+            Tem certeza que deseja excluir <strong>{removeTarget.nome}</strong>?
+          </p>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button variant="ghost" onClick={() => setRemoveTarget(null)}>
+              Cancelar
+            </Button>
+            <Button variant="danger" icon={Trash2} onClick={() => remove(removeTarget)}>
+              Excluir
+            </Button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ---------- Relatórios ----------
+
+const DIMENSOES = [
+  { key: "sala", label: "Por sala/localização" },
+  { key: "categoria", label: "Por categoria" },
+  { key: "status", label: "Por status" },
+  { key: "responsavel", label: "Por responsável" },
+];
+
+function Relatorios({ state, historico }) {
+  const [dimensao, setDimensao] = useState("sala");
+  const [valor, setValor] = useState("");
+
+  const opcoesValor = useMemo(() => {
+    if (dimensao === "sala") return state.areas.map((a) => a.nome);
+    if (dimensao === "categoria") return [...new Set(state.categorias.map((c) => c.nome))];
+    if (dimensao === "status") return STATUS_OPTIONS;
+    if (dimensao === "responsavel") return state.responsaveis.map((r) => r.nome);
+    return [];
+  }, [dimensao, state]);
+
+  useEffect(() => {
+    setValor("");
+  }, [dimensao]);
+
+  const linhas = useMemo(() => {
+    return state.inventario.filter((r) => {
+      if (!valor) return true;
+      return (r[dimensao] || "") === valor;
+    });
+  }, [state.inventario, dimensao, valor]);
+
+  const agrupado = useMemo(() => {
+    const map = {};
+    state.inventario.forEach((r) => {
+      const k = r[dimensao] || "—";
+      map[k] = (map[k] || 0) + 1;
+    });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  }, [state.inventario, dimensao]);
+
+  const columns = [
+    { key: "id", label: "Patrimônio" },
+    { key: "categoria", label: "Categoria" },
+    { key: "marca", label: "Marca" },
+    { key: "modelo", label: "Modelo" },
+    { key: "sala", label: "Sala" },
+    { key: "status", label: "Status" },
+    { key: "responsavel", label: "Responsável" },
+  ];
+
+  function exportar() {
+    const csv = toCSV(linhas, columns);
+    downloadBlob(`relatorio-${dimensao}${valor ? "-" + valor : ""}.csv`, new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" }));
+  }
+
+  return (
+    <div>
+      <h2 style={{ margin: "0 0 18px 0", fontSize: 20, fontWeight: 700, color: COLORS.ink }}>Relatórios</h2>
+
+      <Panel style={{ marginBottom: 14 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div style={{ minWidth: 200 }}>
+            <Field label="Agrupar por">
+              <Select value={dimensao} onChange={(e) => setDimensao(e.target.value)}>
+                {DIMENSOES.map((d) => (
+                  <option key={d.key} value={d.key}>
+                    {d.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <div style={{ minWidth: 220, flex: 1 }}>
+            <Field label="Filtrar valor específico (opcional)">
+              <Select value={valor} onChange={(e) => setValor(e.target.value)}>
+                <option value="">Todos</option>
+                {opcoesValor.map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <div style={{ marginBottom: 14 }}>
+            <Button variant="accent" icon={Download} onClick={exportar}>
+              Exportar CSV
+            </Button>
+          </div>
+        </div>
+      </Panel>
+
+      <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 16 }}>
+        <Panel title="Contagem">
+          <div style={{ maxHeight: 460, overflow: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <tbody>
+                {agrupado.map(([k, v]) => (
+                  <tr
+                    key={k}
+                    onClick={() => setValor(k === valor ? "" : k)}
+                    style={{ borderBottom: `1px solid ${COLORS.line}`, cursor: "pointer", background: valor === k ? COLORS.accentSoft : "transparent" }}
+                  >
+                    <td style={{ padding: "7px 4px", color: COLORS.ink }}>{k}</td>
+                    <td style={{ padding: "7px 4px", textAlign: "right", fontWeight: 600, color: COLORS.ink }}>{v}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+
+        <Panel title={`Equipamentos${valor ? " — " + valor : ""}`}>
+          <div style={{ maxHeight: 460, overflow: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${COLORS.lineStrong}` }}>
+                  {columns.map((c) => (
+                    <th key={c.key} style={{ textAlign: "left", padding: "7px 5px", color: COLORS.inkSoft, fontSize: 11.5, position: "sticky", top: 0, background: COLORS.surface }}>
+                      {c.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {linhas.map((r) => (
+                  <tr key={r.id} style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+                    <td style={{ padding: "6px 5px", fontFamily: "ui-monospace, monospace" }}>{r.id}</td>
+                    <td style={{ padding: "6px 5px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <CategoriaIcon categoria={r.categoria} color={COLORS.inkSoft} size={13} />
+                        {r.categoria}
+                      </div>
+                    </td>
+                    <td style={{ padding: "6px 5px" }}>{r.marca}</td>
+                    <td style={{ padding: "6px 5px" }}>{r.modelo}</td>
+                    <td style={{ padding: "6px 5px" }}>{r.sala}</td>
+                    <td style={{ padding: "6px 5px" }}>
+                      <StatusPill status={r.status} />
+                    </td>
+                    <td style={{ padding: "6px 5px" }}>{r.responsavel}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      </div>
+
+      {historico && historico.length > 0 && (
+        <Panel title="Histórico mensal" style={{ marginTop: 16 }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${COLORS.lineStrong}` }}>
+                  {["Mês", "Total equip.", "Em uso", "Em manutenção", "Precisa manutenção", "Chamados abertos", "Chamados resolvidos"].map((h) => (
+                    <th key={h} style={{ textAlign: "left", padding: "7px 6px", color: COLORS.inkSoft, fontSize: 11.5 }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {[...historico]
+                  .sort((a, b) => a.mes.localeCompare(b.mes))
+                  .map((h) => (
+                    <tr key={h.mes} style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+                      <td style={{ padding: "7px 6px", color: COLORS.ink, fontWeight: 600 }}>{h.mes}</td>
+                      <td style={{ padding: "7px 6px", color: COLORS.inkSoft }}>{h.totalEquipamentos}</td>
+                      <td style={{ padding: "7px 6px", color: COLORS.inkSoft }}>{h.emUso}</td>
+                      <td style={{ padding: "7px 6px", color: COLORS.inkSoft }}>{h.emManutencao}</td>
+                      <td style={{ padding: "7px 6px", color: COLORS.inkSoft }}>{h.precisaManutencao}</td>
+                      <td style={{ padding: "7px 6px", color: COLORS.inkSoft }}>{h.chamadosAbertos}</td>
+                      <td style={{ padding: "7px 6px", color: COLORS.inkSoft }}>{h.chamadosResolvidos}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+          <p style={{ fontSize: 11.5, color: COLORS.inkSoft, marginTop: 10, marginBottom: 0 }}>
+            Um retrato novo é guardado automaticamente uma vez por mês, na primeira vez que algo é salvo naquele mês.
+          </p>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
+// ---------- Importar / Exportar ----------
+
+function Importar({ state, setState, unidadeAtiva, secret, podeEditar = true }) {
+  const fileRef = useRef(null);
+  const [status, setStatus] = useState(null); // {type: 'ok'|'error', msg}
+  const [busy, setBusy] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearConfirmText, setClearConfirmText] = useState("");
+  const [clearSenha, setClearSenha] = useState("");
+  const [clearErro, setClearErro] = useState("");
+  const [pending, setPending] = useState(null); // array de equipamentos lidos do arquivo, aguardando confirmação
+
+  const nomeUnidade = (UNIDADES.find((u) => u.id === unidadeAtiva) || {}).nome || unidadeAtiva;
+  const inventarioUnidade = useMemo(() => state.inventario.filter((r) => unidadeDe(r) === unidadeAtiva), [state.inventario, unidadeAtiva]);
+
+  function clearInventario() {
+    if (!podeEditar) return;
+    if (clearSenha !== secret) {
+      setClearErro("Senha incorreta.");
+      return;
+    }
+    setState((prev) => ({ ...prev, inventario: prev.inventario.filter((r) => unidadeDe(r) !== unidadeAtiva) }));
+    setClearOpen(false);
+    setClearConfirmText("");
+    setClearSenha("");
+    setClearErro("");
+  }
+
+  function handleFile(e) {
+    if (!podeEditar) return;
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setBusy(true);
+    setStatus(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const wb = XLSX.read(ev.target.result, { type: "array" });
+        const sheetName = wb.SheetNames.find((n) => n.toLowerCase().includes("invent")) || wb.SheetNames[0];
+        const sheet = wb.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
+
+        const brutos = [];
+        for (let i = 1; i < rows.length; i++) {
+          const r = rows[i] || [];
+          const categoria = r[1];
+          const marca = r[2];
+          const modelo = r[3];
+          const serie = r[4];
+          const sala = r[5];
+          const statusVal = r[6];
+          const resp = r[7];
+          const obs = r[8];
+          const allEmpty = r.slice(0, 9).every((x) => x === null || x === undefined || x === "");
+          if (allEmpty) continue;
+          if (!categoria) continue; // linha de lote/cabeçalho, sem categoria
+          brutos.push({
+            categoria: String(categoria).trim(),
+            marca: marca ? String(marca).trim() : "",
+            modelo: modelo ? String(modelo).trim() : "",
+            serie: serie ? String(serie).trim() : "",
+            sala: sala ? String(sala).trim() : "",
+            status: statusVal ? String(statusVal).trim() : "Em uso",
+            responsavel: resp ? String(resp).trim() : "",
+            observacoes: obs ? String(obs).trim() : "",
+          });
+        }
+
+        if (brutos.length === 0) {
+          setStatus({ type: "error", msg: "Nenhum equipamento foi encontrado na planilha. Confira se a aba segue o modelo com as colunas Categoria, Marca, Modelo, Nº de Série, Sala/Localização, Status, Responsável, Observações." });
+          setBusy(false);
+        } else {
+          setPending(brutos);
+          setBusy(false);
+        }
+      } catch (err) {
+        setStatus({ type: "error", msg: "Não foi possível ler esse arquivo. Verifique se é um .xlsx válido no formato esperado." });
+        setBusy(false);
+      }
+      if (fileRef.current) fileRef.current.value = "";
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function confirmarImportacao(modo) {
+    if (!podeEditar) return;
+    const brutos = pending;
+    if (!brutos) return;
+
+    const baseInventario = modo === "substituir" ? [] : state.inventario;
+    let seqBase = 0;
+    if (modo === "adicionar") {
+      state.inventario.forEach((r) => {
+        const m = /(\d+)$/.exec(r.id || "");
+        if (m) seqBase = Math.max(seqBase, parseInt(m[1], 10));
+      });
+    }
+
+    const categoriasBase = modo === "substituir" ? state.categorias.filter((c) => unidadeDe(c) !== unidadeAtiva) : state.categorias;
+    const nomesExistentes = new Set(nomesCategoriasDaUnidade(categoriasBase, unidadeAtiva));
+    const novasCategoriasUnidade = [];
+    const areasBase = modo === "substituir" ? state.areas.filter((a) => unidadeDe(a) !== unidadeAtiva) : state.areas;
+    const novaAreas = new Map(areasBase.filter((a) => unidadeDe(a) === unidadeAtiva).map((a) => [a.nome, a]));
+    const novos = brutos.map((b) => {
+      seqBase += 1;
+      if (!nomesExistentes.has(b.categoria)) {
+        nomesExistentes.add(b.categoria);
+        novasCategoriasUnidade.push({ nome: b.categoria, unidade: unidadeAtiva });
+      }
+      if (b.sala && !novaAreas.has(b.sala)) {
+        novaAreas.set(b.sala, { id: uid("AR"), nome: b.sala, tipo: "Outro", unidade: unidadeAtiva });
+      }
+      return {
+        id: state.prefixo + "-" + String(seqBase).padStart(4, "0"),
+        categoria: b.categoria,
+        marca: b.marca,
+        modelo: b.modelo,
+        serie: b.serie,
+        sala: b.sala,
+        status: b.status,
+        responsavel: b.responsavel,
+        observacoes: b.observacoes,
+        dataCompra: "",
+        valor: "",
+        vidaUtil: "",
+        unidade: unidadeAtiva,
+      };
+    });
+
+    setState((prev) => ({
+      ...prev,
+      categorias: [...categoriasBase, ...novasCategoriasUnidade],
+      areas: [...areasBase.filter((a) => unidadeDe(a) !== unidadeAtiva), ...Array.from(novaAreas.values())],
+      inventario: [...(modo === "substituir" ? prev.inventario.filter((r) => unidadeDe(r) !== unidadeAtiva) : prev.inventario), ...novos],
+    }));
+
+    setStatus({
+      type: "ok",
+      msg:
+        modo === "substituir"
+          ? `Inventário de ${nomeUnidade} substituído: ${novos.length} equipamento(s) importado(s), cada um com patrimônio próprio.`
+          : `${novos.length} equipamento(s) adicionado(s) em ${nomeUnidade}, cada um com patrimônio próprio.`,
+    });
+    setPending(null);
+  }
+
+  function exportarXlsx() {
+    const cols = [
+      ["Nº Patrimônio", "Categoria", "Marca", "Modelo", "Nº de Série", "Sala/Localização", "Status", "Responsável", "Observações", "Data de compra", "Valor de aquisição", "Vida útil (anos)", "Unidade"],
+    ];
+    const data = inventarioUnidade.map((r) => [r.id, r.categoria, r.marca, r.modelo, r.serie, r.sala, r.status, r.responsavel, r.observacoes, r.dataCompra, r.valor, r.vidaUtil, nomeUnidade]);
+    const ws = XLSX.utils.aoa_to_sheet([...cols, ...data]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Inventário");
+    XLSX.writeFile(wb, `inventario_ti_${unidadeAtiva}.xlsx`);
+  }
+
+  function exportarCSV() {
+    const columns = [
+      { key: "id", label: "Nº Patrimônio" },
+      { key: "categoria", label: "Categoria" },
+      { key: "marca", label: "Marca" },
+      { key: "modelo", label: "Modelo" },
+      { key: "serie", label: "Nº de Série" },
+      { key: "sala", label: "Sala/Localização" },
+      { key: "status", label: "Status" },
+      { key: "responsavel", label: "Responsável" },
+      { key: "observacoes", label: "Observações" },
+      { key: "unidadeNome", label: "Unidade" },
+    ];
+    const linhas = inventarioUnidade.map((r) => ({ ...r, unidadeNome: nomeUnidade }));
+    const csv = toCSV(linhas, columns);
+    downloadBlob(`inventario_ti_${unidadeAtiva}.csv`, new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" }));
+  }
+
+  return (
+    <div>
+      <h2 style={{ margin: "0 0 18px 0", fontSize: 20, fontWeight: 700, color: COLORS.ink }}>Importar e exportar</h2>
+
+      <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <Panel title="Importar planilha (.xlsx)">
+          <p style={{ fontSize: 13.5, color: COLORS.inkSoft, marginTop: 0 }}>
+            Envie um arquivo no formato da planilha original: colunas Categoria, Marca, Modelo, Nº de Série, Sala/Localização, Status, Responsável e Observações. Depois de ler o arquivo, você escolhe se quer substituir tudo ou adicionar aos equipamentos já existentes — assim dá pra evitar duplicar equipamentos ao reimportar a mesma planilha.
+          </p>
+          {podeEditar ? (
+            <>
+              <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ display: "none" }} />
+              <Button variant="primary" icon={FileSpreadsheet} onClick={() => fileRef.current && fileRef.current.click()} disabled={busy}>
+                {busy ? "Importando..." : "Selecionar arquivo .xlsx"}
+              </Button>
+            </>
+          ) : (
+            <p style={{ fontSize: 12.5, color: COLORS.inkSoft, fontStyle: "italic" }}>Você só tem permissão pra visualizar, não pra importar.</p>
+          )}
+          {status && (
+            <div
+              style={{
+                marginTop: 14,
+                padding: "10px 12px",
+                borderRadius: 6,
+                fontSize: 13,
+                background: status.type === "ok" ? "#E3EEE9" : COLORS.dangerSoft,
+                color: status.type === "ok" ? "#1F4D40" : COLORS.danger,
+              }}
+            >
+              {status.msg}
+            </div>
+          )}
+        </Panel>
+
+        <Panel title={`Exportar inventário — ${nomeUnidade}`}>
+          <p style={{ fontSize: 13.5, color: COLORS.inkSoft, marginTop: 0 }}>
+            Baixe os {inventarioUnidade.length} equipamentos cadastrados em {nomeUnidade}, para backup ou para compartilhar com a direção da escola.
+          </p>
+          <div style={{ display: "flex", gap: 10 }}>
+            <Button variant="accent" icon={Download} onClick={exportarXlsx}>
+              Baixar .xlsx
+            </Button>
+            <Button variant="ghost" icon={Download} onClick={exportarCSV}>
+              Baixar .csv
+            </Button>
+          </div>
+        </Panel>
+      </div>
+
+      {podeEditar && (
+        <Panel title={`Zona de risco — ${nomeUnidade}`} style={{ marginTop: 16, borderColor: COLORS.dangerSoft }}>
+          <p style={{ fontSize: 13.5, color: COLORS.inkSoft, marginTop: 0 }}>
+            Exclui todos os {inventarioUnidade.length} equipamentos cadastrados nessa unidade ({nomeUnidade}) — não afeta as outras unidades. Útil para apagar dados desatualizados antes de importar uma planilha nova ou recomeçar o cadastro do zero. As categorias, salas e responsáveis cadastrados não são afetados.
+          </p>
+          <Button variant="danger" icon={Trash2} onClick={() => setClearOpen(true)} disabled={inventarioUnidade.length === 0}>
+            Excluir equipamentos de {nomeUnidade}
+          </Button>
+        </Panel>
+      )}
+
+      {pending && (
+        <Modal title={`Confirmar importação — ${nomeUnidade}`} onClose={() => setPending(null)} width={460}>
+          <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+            Encontramos <strong>{pending.length}</strong> equipamento(s) nessa planilha. A unidade <strong>{nomeUnidade}</strong> já tem <strong>{inventarioUnidade.length}</strong> equipamento(s) cadastrado(s). O que você quer fazer?
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 6 }}>
+            <button
+              onClick={() => confirmarImportacao("substituir")}
+              style={{
+                textAlign: "left",
+                padding: "12px 14px",
+                borderRadius: 8,
+                border: `1px solid ${COLORS.danger}`,
+                background: COLORS.dangerSoft,
+                cursor: "pointer",
+              }}
+            >
+              <div style={{ fontWeight: 700, color: COLORS.danger, fontSize: 13.5 }}>Substituir tudo</div>
+              <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginTop: 2 }}>
+                Apaga os {inventarioUnidade.length} equipamentos atuais de {nomeUnidade} (só dessa unidade) e coloca só os {pending.length} desta planilha. Use quando essa planilha é a versão correta e mais atual.
+              </div>
+            </button>
+            <button
+              onClick={() => confirmarImportacao("adicionar")}
+              style={{
+                textAlign: "left",
+                padding: "12px 14px",
+                borderRadius: 8,
+                border: `1px solid ${COLORS.lineStrong}`,
+                background: "#fff",
+                cursor: "pointer",
+              }}
+            >
+              <div style={{ fontWeight: 700, color: COLORS.ink, fontSize: 13.5 }}>Adicionar aos existentes</div>
+              <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginTop: 2 }}>
+                Mantém os {inventarioUnidade.length} equipamentos atuais de {nomeUnidade} e soma os {pending.length} desta planilha. Só use se tiver certeza de que não é a mesma planilha já cadastrada — senão os equipamentos ficam duplicados.
+              </div>
+            </button>
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
+            <Button variant="ghost" onClick={() => setPending(null)}>
+              Cancelar
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {clearOpen && (
+        <Modal
+          title={`Excluir equipamentos — ${nomeUnidade}`}
+          onClose={() => {
+            setClearOpen(false);
+            setClearConfirmText("");
+            setClearSenha("");
+            setClearErro("");
+          }}
+          width={420}
+        >
+          <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+            Isso vai excluir permanentemente os <strong>{inventarioUnidade.length}</strong> equipamentos cadastrados em <strong>{nomeUnidade}</strong>. Essa ação não pode ser desfeita e não afeta as outras unidades. Se quiser manter um registro, exporte antes usando os botões acima.
+          </p>
+          <Field label='Digite EXCLUIR para confirmar'>
+            <TextInput value={clearConfirmText} onChange={(e) => setClearConfirmText(e.target.value)} placeholder="EXCLUIR" />
+          </Field>
+          <Field label="Confirme sua senha de administrador">
+            <TextInput
+              type="password"
+              value={clearSenha}
+              onChange={(e) => {
+                setClearSenha(e.target.value);
+                setClearErro("");
+              }}
+            />
+          </Field>
+          {clearErro && <div style={{ color: COLORS.danger, fontSize: 13, marginBottom: 10 }}>{clearErro}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setClearOpen(false);
+                setClearConfirmText("");
+                setClearSenha("");
+                setClearErro("");
+              }}
+            >
+              Cancelar
+            </Button>
+            <Button
+              variant="danger"
+              icon={Trash2}
+              onClick={clearInventario}
+              disabled={clearConfirmText.trim().toUpperCase() !== "EXCLUIR" || !clearSenha}
+            >
+              Excluir tudo
+            </Button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ---------- App ----------
+
+
+// ---------- Chamados (chat de abertura de chamados) ----------
+
+const TIPO_CHAMADO_OPTIONS = ["Problema técnico", "Sugestão/Feedback", "Solicitar"];
+
+function TipoChamadoBadge({ tipo }) {
+  if (!tipo || tipo === "Problema técnico") return null;
+  return (
+    <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 8px", borderRadius: 999, color: COLORS.accent, background: COLORS.accentSoft, whiteSpace: "nowrap" }}>
+      {tipo}
+    </span>
+  );
+}
+
+function novoChamadoForm(unidadeAtiva) {
+  return { tipo: "Problema técnico", unidade: unidadeAtiva || "colegio", sala: "", categoria: "", texto: "", foto: "" };
+}
+
+function Chamados({ state, setState, unidadeAtiva, secret, podeAbrirChamados = true, podeResponderChamados = true, responderSoProprios = false, meuNome = "", fotosSolicitantes = {} }) {
+  const [selectedId, setSelectedId] = useState(null);
+  const [novoMode, setNovoMode] = useState(false);
+  const [form, setForm] = useState(novoChamadoForm(unidadeAtiva));
+  const [replyText, setReplyText] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [viewMode, setViewMode] = useState("lista");
+  const [fotoBusyAdmin, setFotoBusyAdmin] = useState(false);
+  const fotoInputRefAdmin = useRef(null);
+  const scrollRef = useRef(null);
+  const [busy, setBusy] = useState(false);
+  const [erro, setErro] = useState("");
+
+  // Quando responderSoProprios está ligado, o admin só pode responder (ou
+  // mudar status/excluir) os chamados que ELE MESMO abriu — chamados
+  // abertos por um solicitante direto, ou por outro admin, ficam só pra
+  // visualização. O backend também bloqueia isso (é a proteção de verdade);
+  // aqui é só pra não mostrar um botão que vai dar erro.
+  function podeMexerNesseChamado(chamado) {
+    if (!podeResponderChamados) return false;
+    if (!responderSoProprios) return true;
+    return chamado && chamado.abertoPorAdmin === meuNome;
+  }
+
+  const chamados = useMemo(() => (state.chamados || []).filter((c) => unidadeDe(c) === unidadeAtiva), [state.chamados, unidadeAtiva]);
+  const ordenados = useMemo(() => [...chamados].sort((a, b) => new Date(b.criadoEm) - new Date(a.criadoEm)), [chamados]);
+  const selecionado = chamados.find((c) => c.id === selectedId) || null;
+
+  async function handleFotoAdmin(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setFotoBusyAdmin(true);
+    try {
+      const dataUrl = await resizeImageParaBase64(file, 800, 0.6);
+      setForm((prev) => ({ ...prev, foto: dataUrl }));
+    } catch (err) {}
+    setFotoBusyAdmin(false);
+    if (fotoInputRefAdmin.current) fotoInputRefAdmin.current.value = "";
+  }
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [selecionado, selecionado && selecionado.mensagens.length]);
+
+  function abrirNovo() {
+    if (!podeAbrirChamados) return;
+    setNovoMode(true);
+    setSelectedId(null);
+    setForm(novoChamadoForm(unidadeAtiva));
+  }
+
+  async function enviarNovoChamado() {
+    if (!podeAbrirChamados) return;
+    const texto = form.texto.trim();
+    if (!texto) return;
+    const chamado = {
+      id: uid("CH"),
+      assunto: texto.length > 60 ? texto.slice(0, 57) + "..." : texto,
+      tipo: form.tipo,
+      unidade: form.unidade || unidadeAtiva,
+      sala: form.sala,
+      categoria: form.categoria,
+      foto: form.foto || "",
+      status: "Aberto",
+      criadoEm: new Date().toISOString(),
+      mensagens: [{ autor: "solicitante", texto, data: new Date().toISOString() }],
+    };
+    setBusy(true);
+    setErro("");
+    try {
+      const res = await backendPost("novoChamado", { chamado, secret });
+      if (!res.ok) throw new Error(res.error || "Erro ao abrir chamado");
+      setState((prev) => ({ ...prev, chamados: [...(prev.chamados || []), chamado] }));
+      setNovoMode(false);
+      setForm(novoChamadoForm(unidadeAtiva));
+      setSelectedId(chamado.id);
+    } catch (e) {
+      setErro("Não foi possível abrir o chamado. Tente novamente.");
+    }
+    setBusy(false);
+  }
+
+  async function enviarResposta() {
+    if (!podeMexerNesseChamado(selecionado)) return;
+    const texto = replyText.trim();
+    if (!texto || !selecionado) return;
+    const mensagem = { autor: "ti", nome: meuNome, texto, data: new Date().toISOString() };
+    setBusy(true);
+    setErro("");
+    try {
+      const res = await backendPost("novaMensagem", { chamadoId: selecionado.id, mensagem, secret });
+      if (!res.ok) throw new Error(res.error || "Erro ao enviar mensagem");
+      setState((prev) => ({
+        ...prev,
+        chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: [...c.mensagens, mensagem] } : c)),
+      }));
+      setReplyText("");
+    } catch (e) {
+      setErro("Não foi possível enviar. Tente novamente.");
+    }
+    setBusy(false);
+  }
+
+  async function mudarStatus(status) {
+    if (!selecionado || !podeMexerNesseChamado(selecionado)) return;
+    setBusy(true);
+    setErro("");
+    try {
+      const res = await backendPost("mudarStatusChamado", { chamadoId: selecionado.id, status, secret });
+      if (!res.ok) throw new Error(res.error || "Erro ao mudar status");
+      setState((prev) => ({
+        ...prev,
+        chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, status } : c)),
+      }));
+    } catch (e) {
+      setErro("Não foi possível mudar o status. Tente novamente.");
+    }
+    setBusy(false);
+  }
+
+  async function excluirChamado(chamado) {
+    if (!podeMexerNesseChamado(chamado)) return;
+    setBusy(true);
+    setErro("");
+    try {
+      const res = await backendPost("excluirChamado", { chamadoId: chamado.id, secret });
+      if (!res.ok) throw new Error(res.error || "Erro ao excluir chamado");
+      setState((prev) => ({ ...prev, chamados: prev.chamados.filter((c) => c.id !== chamado.id) }));
+      if (selectedId === chamado.id) setSelectedId(null);
+    } catch (e) {
+      setErro("Não foi possível excluir o chamado. Tente novamente.");
+    }
+    setDeleteTarget(null);
+    setBusy(false);
+  }
+
+  return (
+    <div>
+      {erro && <div style={{ color: COLORS.danger, fontSize: 13, marginBottom: 10 }}>{erro}</div>}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: COLORS.ink }}>Chamados</h2>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", background: COLORS.paper, borderRadius: 8, padding: 3 }}>
+            <button
+              onClick={() => setViewMode("lista")}
+              style={{
+                fontSize: 12.5,
+                fontWeight: 600,
+                padding: "7px 14px",
+                borderRadius: 6,
+                cursor: "pointer",
+                color: COLORS.ink,
+                background: viewMode === "lista" ? "#fff" : "transparent",
+                border: viewMode === "lista" ? `1px solid ${COLORS.line}` : "1px solid transparent",
+              }}
+            >
+              Lista
+            </button>
+            <button
+              onClick={() => setViewMode("quadro")}
+              style={{
+                fontSize: 12.5,
+                fontWeight: 600,
+                padding: "7px 14px",
+                borderRadius: 6,
+                cursor: "pointer",
+                color: COLORS.ink,
+                background: viewMode === "quadro" ? "#fff" : "transparent",
+                border: viewMode === "quadro" ? `1px solid ${COLORS.line}` : "1px solid transparent",
+              }}
+            >
+              Quadro
+            </button>
+          </div>
+          {podeAbrirChamados && (
+            <Button variant="primary" icon={Plus} onClick={abrirNovo}>
+              Novo chamado
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {viewMode === "quadro" && (
+        <ChamadosKanban
+          chamados={ordenados}
+          onSelect={(c) => {
+            setSelectedId(c.id);
+            setNovoMode(false);
+            setViewMode("lista");
+          }}
+        />
+      )}
+
+      {viewMode === "lista" && (
+      <>
+      <div className="grid-chat" style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 16, height: 560 }}>
+        <Panel style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          <div style={{ padding: "12px 14px", borderBottom: `1px solid ${COLORS.line}`, fontSize: 12.5, color: COLORS.inkSoft, fontWeight: 600 }}>
+            {ordenados.length} chamado{ordenados.length !== 1 ? "s" : ""}
+          </div>
+          <div style={{ overflow: "auto", flex: 1 }}>
+            {ordenados.length === 0 ? (
+              <EmptyState text="Nenhum chamado aberto ainda." />
+            ) : (
+              ordenados.map((c) => (
+                <div
+                  key={c.id}
+                  onClick={() => {
+                    setSelectedId(c.id);
+                    setNovoMode(false);
+                  }}
+                  style={{
+                    padding: "10px 14px",
+                    borderBottom: `1px solid ${COLORS.line}`,
+                    cursor: "pointer",
+                    background: selectedId === c.id ? COLORS.accentSoft : "transparent",
+                    position: "relative",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 6 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.ink, marginBottom: 4 }}>
+                      {c.assunto} {c.tipo && c.tipo !== "Problema técnico" && <TipoChamadoBadge tipo={c.tipo} />}
+                    </div>
+                    {podeMexerNesseChamado(c) && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteTarget(c);
+                        }}
+                        style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.inkSoft, padding: 2, flexShrink: 0 }}
+                        aria-label="Excluir chamado"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: 11.5, color: COLORS.inkSoft }}>{c.solicitante ? c.solicitante + " · " : ""}{c.sala || "Sem sala"}</span>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 600,
+                        padding: "2px 8px",
+                        borderRadius: 999,
+                        color: CHAMADO_STATUS_COLORS[c.status],
+                        background: CHAMADO_STATUS_BG[c.status],
+                      }}
+                    >
+                      {c.status}
+                    </span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </Panel>
+
+        <Panel style={{ padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          {novoMode ? (
+            <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+              <div style={{ padding: "14px 18px", borderBottom: `1px solid ${COLORS.line}`, fontSize: 14, fontWeight: 700, color: COLORS.ink }}>Abrir novo chamado</div>
+              <div style={{ padding: 18, flex: 1, overflow: "auto" }}>
+                <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+                  <Field label="Tipo de chamado">
+                    <Select value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })}>
+                      {TIPO_CHAMADO_OPTIONS.map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                  <Field label="Unidade">
+                    <Select value={form.unidade} onChange={(e) => setForm({ ...form, unidade: e.target.value, sala: "", categoria: "" })}>
+                      {UNIDADES.map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.nome}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                </div>
+                <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+                  <Field label="Sala relacionada (opcional)">
+                    <Select value={form.sala} onChange={(e) => setForm({ ...form, sala: e.target.value })}>
+                      <option value="">Nenhuma</option>
+                      {state.areas.filter((a) => unidadeDe(a) === form.unidade).map((a) => (
+                        <option key={a.id} value={a.nome}>
+                          {a.nome}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                  <Field label="Categoria relacionada (opcional)">
+                    <Select value={form.categoria} onChange={(e) => setForm({ ...form, categoria: e.target.value })}>
+                      <option value="">Nenhuma</option>
+                      {nomesCategoriasDaUnidade(state.categorias, form.unidade).map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                </div>
+                <Field label="Descreva">
+                  <textarea
+                    value={form.texto}
+                    onChange={(e) => setForm({ ...form, texto: e.target.value })}
+                    rows={4}
+                    placeholder="Ex: O projetor da sala 108 não liga mais..."
+                    style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }}
+                  />
+                </Field>
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 13, color: COLORS.inkSoft, marginBottom: 5 }}>Foto (opcional)</div>
+                  <input ref={fotoInputRefAdmin} type="file" accept="image/*" onChange={handleFotoAdmin} style={{ display: "none" }} />
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {form.foto && (
+                      <div style={{ width: 64, height: 64, borderRadius: 8, overflow: "hidden", border: `1px solid ${COLORS.line}`, position: "relative" }}>
+                        <img src={form.foto} alt="Foto anexada" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        <button
+                          onClick={() => setForm((prev) => ({ ...prev, foto: "" }))}
+                          style={{ position: "absolute", top: 2, right: 2, background: "rgba(0,0,0,0.55)", border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", padding: 2 }}
+                          aria-label="Remover foto"
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => fotoInputRefAdmin.current && fotoInputRefAdmin.current.click()}
+                      disabled={fotoBusyAdmin}
+                      style={{
+                        width: 64,
+                        height: 64,
+                        borderRadius: 8,
+                        border: `1px dashed ${COLORS.lineStrong}`,
+                        background: "#fff",
+                        color: COLORS.inkSoft,
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 4,
+                        cursor: "pointer",
+                        fontSize: 10,
+                      }}
+                    >
+                      <Plus size={16} />
+                      {fotoBusyAdmin ? "..." : "Adicionar"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div style={{ padding: 14, borderTop: `1px solid ${COLORS.line}`, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                <Button variant="ghost" onClick={() => setNovoMode(false)}>
+                  Cancelar
+                </Button>
+                <Button variant="primary" icon={Send} onClick={enviarNovoChamado} disabled={busy || !form.texto.trim()}>
+                  Abrir chamado
+                </Button>
+              </div>
+            </div>
+          ) : !selecionado ? (
+            <EmptyState text="Selecione um chamado à esquerda ou abra um novo." />
+          ) : (
+            <div className="chamado-detail" style={{ display: "flex", height: "100%" }}>
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, borderRight: `1px solid ${COLORS.line}` }}>
+                <div style={{ padding: "14px 18px", borderBottom: `1px solid ${COLORS.line}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.ink, display: "flex", alignItems: "center", gap: 8 }}>
+                    {selecionado.assunto} <TipoChamadoBadge tipo={selecionado.tipo} />
+                  </div>
+                  {podeMexerNesseChamado(selecionado) && (
+                    <button
+                      onClick={() => setDeleteTarget(selecionado)}
+                      style={{ background: "#fff", border: `1px solid ${COLORS.danger}`, borderRadius: 6, cursor: "pointer", color: COLORS.danger, padding: "6px 9px", flexShrink: 0 }}
+                      aria-label="Excluir chamado"
+                      title="Excluir chamado"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+
+                <div ref={scrollRef} style={{ flex: 1, overflow: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
+                  {selecionado.foto && (
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <Avatar nome={selecionado.solicitante || "?"} foto={fotosSolicitantes[selecionado.solicitante]} />
+                      <a href={selecionado.foto} target="_blank" rel="noreferrer">
+                        <img src={selecionado.foto} alt="Foto do chamado" style={{ width: 90, height: 90, borderRadius: 8, objectFit: "cover", border: `1px solid ${COLORS.line}` }} />
+                      </a>
+                    </div>
+                  )}
+                  {selecionado.mensagens.map((m, i) => {
+                    const abertura = i === 0;
+                    const nomeAutor = m.autor === "ti" ? m.nome || "Administrador" : selecionado.solicitante || "Solicitante";
+                    const bg = abertura ? "#E3EEE9" : m.autor === "ti" ? "#F3E2C8" : "#fff";
+                    const borda = abertura ? "#2F6F5E" : m.autor === "ti" ? COLORS.accent : COLORS.line;
+                    return (
+                      <div key={i} style={{ display: "flex", gap: 10 }}>
+                        <Avatar nome={nomeAutor} foto={m.autor === "ti" ? undefined : fotosSolicitantes[selecionado.solicitante]} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div
+                            style={{
+                              padding: "9px 13px",
+                              borderRadius: 10,
+                              borderLeft: `3px solid ${borda}`,
+                              fontSize: 13.5,
+                              background: bg,
+                              color: COLORS.ink,
+                            }}
+                          >
+                            <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.inkSoft, marginBottom: 3 }}>
+                              {nomeAutor} {abertura && <span style={{ color: "#2F6F5E" }}>· abriu o chamado</span>}
+                            </div>
+                            <div>{m.texto}</div>
+                          </div>
+                          <div style={{ fontSize: 10.5, color: COLORS.inkSoft, marginTop: 3, marginLeft: 4 }}>{formatDateTime(m.data)}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {podeMexerNesseChamado(selecionado) && (
+                  <div style={{ padding: 14, borderTop: `1px solid ${COLORS.line}`, display: "flex", gap: 8 }}>
+                    <TextInput
+                      value={replyText}
+                      onChange={(e) => setReplyText(e.target.value)}
+                      placeholder="Escrever uma atualização..."
+                      onKeyDown={(e) => e.key === "Enter" && enviarResposta()}
+                      style={{ flex: 1 }}
+                    />
+                    <Button variant="primary" icon={Send} onClick={enviarResposta} disabled={busy}>
+                      Enviar
+                    </Button>
+                  </div>
+                )}
+              </div>
+
+              <div style={{ width: 220, flexShrink: 0, padding: 16, overflow: "auto" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 12 }}>Propriedades</div>
+                {[
+                  ["Solicitante", selecionado.solicitante || "—"],
+                  ["Sala", selecionado.sala || "—"],
+                  ["Categoria", selecionado.categoria || "—"],
+                ].map(([label, val]) => (
+                  <div key={label} style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 11, color: COLORS.inkSoft }}>{label}</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.ink, marginTop: 2 }}>{val}</div>
+                  </div>
+                ))}
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 11, color: COLORS.inkSoft, marginBottom: 4 }}>Status</div>
+                  <Select disabled={!podeMexerNesseChamado(selecionado) || busy} value={selecionado.status} onChange={(e) => mudarStatus(e.target.value)} style={{ width: "100%" }}>
+                    {CHAMADO_STATUS_OPTIONS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: COLORS.inkSoft }}>Aberto</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.ink, marginTop: 2 }}>{tempoDecorrido(selecionado.criadoEm)}</div>
+                </div>
+              </div>
+            </div>
+          )}
+        </Panel>
+      </div>
+      </>
+      )}
+
+      {deleteTarget && (
+        <Modal title="Excluir chamado" onClose={() => setDeleteTarget(null)} width={380}>
+          <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+            Tem certeza que deseja excluir o chamado <strong>{deleteTarget.assunto}</strong>? Essa ação não pode ser desfeita.
+          </p>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button variant="ghost" onClick={() => setDeleteTarget(null)}>
+              Cancelar
+            </Button>
+            <Button variant="danger" icon={Trash2} onClick={() => excluirChamado(deleteTarget)} disabled={busy}>
+              Excluir
+            </Button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function ChamadosKanban({ chamados, onSelect }) {
+  const colunas = useMemo(() => {
+    const map = {};
+    CHAMADO_STATUS_OPTIONS.forEach((s) => (map[s] = []));
+    chamados.forEach((c) => {
+      if (!map[c.status]) map[c.status] = [];
+      map[c.status].push(c);
+    });
+    return CHAMADO_STATUS_OPTIONS.map((s) => ({ status: s, itens: map[s] || [] }));
+  }, [chamados]);
+
+  return (
+    <div className="grid-3" style={{ display: "grid", gridTemplateColumns: `repeat(${CHAMADO_STATUS_OPTIONS.length}, minmax(0,1fr))`, gap: 14 }}>
+      {colunas.map((col) => (
+        <div key={col.status}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              height: 30,
+              marginBottom: 10,
+              paddingBottom: 8,
+              borderBottom: `2px solid ${CHAMADO_STATUS_COLORS[col.status]}`,
+            }}
+          >
+            <span style={{ fontSize: 13, fontWeight: 700, color: COLORS.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{col.status}</span>
+            <span
+              style={{
+                marginLeft: "auto",
+                flexShrink: 0,
+                fontSize: 10.5,
+                fontWeight: 700,
+                padding: "1px 7px",
+                borderRadius: 999,
+                color: CHAMADO_STATUS_COLORS[col.status],
+                background: CHAMADO_STATUS_BG[col.status],
+              }}
+            >
+              {col.itens.length}
+            </span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 560, overflow: "auto" }}>
+            {col.itens.length === 0 ? (
+              <div style={{ fontSize: 12, color: COLORS.inkSoft, padding: "8px 2px" }}>—</div>
+            ) : (
+              col.itens.map((c) => (
+                <div
+                  key={c.id}
+                  onClick={() => onSelect(c)}
+                  style={{
+                    background: COLORS.surface,
+                    border: `1px solid ${COLORS.line}`,
+                    borderLeft: `3px solid ${CHAMADO_STATUS_COLORS[col.status]}`,
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    cursor: "pointer",
+                    boxShadow: "0 1px 2px rgba(22,35,61,0.05)",
+                  }}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.ink, marginBottom: 6 }}>{c.assunto}</div>
+                  {c.tipo && c.tipo !== "Problema técnico" && (
+                    <div style={{ marginBottom: 6 }}>
+                      <TipoChamadoBadge tipo={c.tipo} />
+                    </div>
+                  )}
+                  <div style={{ fontSize: 11.5, color: COLORS.inkSoft }}>{c.solicitante ? c.solicitante + " · " : ""}{c.sala || "Sem sala"}</div>
+                  {c.foto && <img src={c.foto} alt="" style={{ width: 20, height: 20, borderRadius: 4, objectFit: "cover", marginTop: 6 }} />}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ErrorScreen({ msg, detail }) {
+  return (
+    <div style={{ padding: 60, textAlign: "center", color: COLORS.danger, fontFamily: "ui-sans-serif, system-ui, sans-serif", maxWidth: 560, margin: "0 auto" }}>
+      <div style={{ fontWeight: 700, marginBottom: 8 }}>Não foi possível conectar</div>
+      <div style={{ fontSize: 14, color: COLORS.inkSoft, marginBottom: detail ? 14 : 0 }}>{msg}</div>
+      {detail && (
+        <div
+          style={{
+            textAlign: "left",
+            fontFamily: "ui-monospace, monospace",
+            fontSize: 12,
+            background: "#fff",
+            border: `1px solid ${COLORS.line}`,
+            borderRadius: 6,
+            padding: 12,
+            color: COLORS.ink,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          }}
+        >
+          {detail}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LoginPublico({ onLoggedIn, onLoggedInAdmin }) {
+  const [modo, setModo] = useState("login"); // "login" | "cadastro"
+  const [nome, setNome] = useState("");
+  const [senha, setSenha] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [erro, setErro] = useState("");
+
+  const [cadNome, setCadNome] = useState("");
+  const [cadEmail, setCadEmail] = useState("");
+  const [cadSenha, setCadSenha] = useState("");
+  const [cadBusy, setCadBusy] = useState(false);
+  const [cadErro, setCadErro] = useState("");
+  const [cadOk, setCadOk] = useState(false);
+
+  async function entrar() {
+    if (!nome.trim() || !senha.trim()) return setErro("Preencha nome e senha.");
+    setBusy(true);
+    setErro("");
+    try {
+      const data = await backendLoginUnificado(nome.trim(), senha);
+      if (!data.ok) throw new Error(data.error || "Erro desconhecido");
+      if (data.isAdmin) {
+        onLoggedInAdmin(data, senha);
+      } else if (data.isUser) {
+        onLoggedIn({ nome: data.nome, senha }, data.state, !!data.isAutorizado, data.foto || "", !!data.podeAbrirChamados);
+      } else {
+        setErro(data.error || "Nome ou senha incorretos.");
+      }
+    } catch (e) {
+      setErro("Não foi possível conectar (" + String((e && e.message) || e) + ").");
+    }
+    setBusy(false);
+  }
+
+  function voltarParaLogin() {
+    setModo("login");
+    setCadNome("");
+    setCadEmail("");
+    setCadSenha("");
+    setCadErro("");
+    setCadOk(false);
+  }
+
+  async function cadastrar() {
+    if (!cadNome.trim() || !cadEmail.trim() || !cadSenha.trim()) return setCadErro("Preencha nome, email e senha.");
+    setCadBusy(true);
+    setCadErro("");
+    try {
+      const data = await backendCadastro(cadNome.trim(), cadEmail.trim(), cadSenha);
+      if (!data.ok) {
+        setCadErro(data.error || "Não foi possível concluir o cadastro.");
+      } else {
+        setCadOk(true);
+      }
+    } catch (e) {
+      setCadErro("Não foi possível conectar (" + String((e && e.message) || e) + ").");
+    }
+    setCadBusy(false);
+  }
+
+  return (
+    <div className="login-split" style={{ minHeight: 640, background: COLORS.paper, display: "flex", fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif" }}>
+      <div
+        className="login-brand-panel"
+        style={{
+          width: "42%",
+          minWidth: 280,
+          background: `linear-gradient(160deg, ${COLORS.ink} 0%, #223454 100%)`,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 40,
+          textAlign: "center",
+        }}
+      >
+        <img src={LOGO_DATA_URL} alt="Logo Colégio Espírito Santo" style={{ width: 68, height: 68, borderRadius: 14, background: "#fff", padding: 4, marginBottom: 18 }} />
+        <div style={{ fontSize: 19, fontWeight: 700, color: "#fff", lineHeight: 1.3 }}>Escola Espírito Santo</div>
+        <div style={{ fontSize: 13.5, color: "#B7C0CF", marginTop: 4 }}>Chamados de TI</div>
+      </div>
+
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 28 }}>
+        <div style={{ width: "100%", maxWidth: 300 }}>
+          {modo === "login" ? (
+            <>
+              <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.ink }}>Bem-vindo(a)</div>
+              <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginBottom: 22 }}>Entre com seu nome (ou email) e senha de acesso</div>
+
+              <div style={{ textAlign: "left" }}>
+                <Field label="Nome ou email">
+                  <TextInput value={nome} onChange={(e) => setNome(e.target.value)} onKeyDown={(e) => e.key === "Enter" && entrar()} placeholder="Como podemos te chamar" />
+                </Field>
+                <Field label="Senha">
+                  <TextInput type="password" value={senha} onChange={(e) => setSenha(e.target.value)} onKeyDown={(e) => e.key === "Enter" && entrar()} />
+                </Field>
+              </div>
+
+              {erro && <div style={{ color: COLORS.danger, fontSize: 12.5, marginBottom: 12, textAlign: "left" }}>{erro}</div>}
+
+              <Button variant="primary" onClick={entrar} disabled={busy} style={{ width: "100%", justifyContent: "center", marginTop: 4 }}>
+                {busy ? "Aguarde..." : "Entrar"}
+              </Button>
+
+              <button
+                onClick={() => setModo("cadastro")}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "center",
+                  marginTop: 14,
+                  background: "none",
+                  border: "none",
+                  color: COLORS.accent,
+                  fontSize: 12.5,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  padding: 4,
+                }}
+              >
+                Não tem conta? Cadastre-se
+              </button>
+            </>
+          ) : cadOk ? (
+            <>
+              <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.ink }}>Cadastro enviado!</div>
+              <p style={{ fontSize: 13, color: COLORS.inkSoft, lineHeight: 1.5, marginTop: 10 }}>
+                Um administrador vai revisar seu pedido e liberar seu acesso. Assim que for aprovado, você já consegue entrar com o email e a senha que acabou de cadastrar.
+              </p>
+              <Button variant="ghost" onClick={voltarParaLogin} style={{ width: "100%", justifyContent: "center", marginTop: 8 }}>
+                Voltar para o login
+              </Button>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.ink }}>Criar conta</div>
+              <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginBottom: 22 }}>Use seu email da escola — um administrador precisa aprovar antes de você conseguir entrar</div>
+
+              <div style={{ textAlign: "left" }}>
+                <Field label="Nome">
+                  <TextInput value={cadNome} onChange={(e) => setCadNome(e.target.value)} placeholder="Seu nome completo" />
+                </Field>
+                <Field label="Email da escola">
+                  <TextInput type="email" value={cadEmail} onChange={(e) => setCadEmail(e.target.value)} placeholder="voce@escola.com.br" />
+                </Field>
+                <Field label="Crie uma senha">
+                  <TextInput type="password" value={cadSenha} onChange={(e) => setCadSenha(e.target.value)} onKeyDown={(e) => e.key === "Enter" && cadastrar()} />
+                </Field>
+              </div>
+
+              {cadErro && <div style={{ color: COLORS.danger, fontSize: 12.5, marginBottom: 12, textAlign: "left" }}>{cadErro}</div>}
+
+              <Button variant="primary" onClick={cadastrar} disabled={cadBusy} style={{ width: "100%", justifyContent: "center", marginTop: 4 }}>
+                {cadBusy ? "Aguarde..." : "Cadastrar"}
+              </Button>
+
+              <button
+                onClick={voltarParaLogin}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "center",
+                  marginTop: 14,
+                  background: "none",
+                  border: "none",
+                  color: COLORS.lineStrong,
+                  fontSize: 12.5,
+                  cursor: "pointer",
+                  padding: 4,
+                }}
+              >
+                Já tem conta? Entrar
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TopBarSolicitante({ nome, foto, onFotoChange, onLogout }) {
+  const fotoInputRef = useRef(null);
+  const [fotoBusy, setFotoBusy] = useState(false);
+
+  async function handleFoto(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setFotoBusy(true);
+    try {
+      const dataUrl = await resizeImageParaBase64(file, 240, 0.7);
+      await onFotoChange(dataUrl);
+    } catch (err) {}
+    setFotoBusy(false);
+    if (fotoInputRef.current) fotoInputRef.current.value = "";
+  }
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", background: COLORS.ink, color: "#fff" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <img src={LOGO_DATA_URL} alt="Logo" style={{ width: 30, height: 30, background: "#fff", borderRadius: 6, padding: 2 }} />
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>Chamados de TI</div>
+          <div style={{ fontSize: 11.5, color: "#9AA6B8" }}>Olá, {nome}</div>
+        </div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <input ref={fotoInputRef} type="file" accept="image/*" onChange={handleFoto} style={{ display: "none" }} />
+        <button
+          onClick={() => fotoInputRef.current && fotoInputRef.current.click()}
+          disabled={fotoBusy}
+          title="Trocar minha foto"
+          aria-label="Trocar minha foto"
+          style={{ position: "relative", background: "none", border: "none", padding: 0, cursor: "pointer", lineHeight: 0, opacity: fotoBusy ? 0.6 : 1 }}
+        >
+          <Avatar nome={nome} foto={foto} size={30} />
+          <span
+            style={{
+              position: "absolute",
+              bottom: -2,
+              right: -2,
+              width: 14,
+              height: 14,
+              borderRadius: "50%",
+              background: COLORS.accent,
+              border: `1.5px solid ${COLORS.ink}`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <Pencil size={8} color="#fff" />
+          </span>
+        </button>
+        <button
+          onClick={onLogout}
+          style={{ background: "none", border: `1px solid rgba(255,255,255,0.3)`, borderRadius: 6, color: "#fff", fontSize: 12, padding: "6px 10px", cursor: "pointer" }}
+        >
+          Sair
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function novoChamadoSolicitanteForm() {
+  return { tipo: "Problema técnico", unidade: "colegio", sala: "", categoria: "", texto: "", foto: "" };
+}
+
+function ChamadosSolicitante({ state, setState, userAuth, onLogout, onFotoChange, embedded = false }) {
+  const chamados = state.chamados || [];
+  const [selectedId, setSelectedId] = useState(null);
+  const [novoMode, setNovoMode] = useState(chamados.length === 0);
+  const [form, setForm] = useState(novoChamadoSolicitanteForm());
+  // Sala/categoria do formulário de novo chamado só mostram o que é da
+  // unidade escolhida ali (form.unidade) — antes vinha tudo junto, de
+  // todas as unidades, e um mesmo nome de sala/categoria repetido em mais
+  // de uma unidade aparecia duplicado na lista.
+  const areasFormUnidade = useMemo(() => (state.areas || []).filter((a) => unidadeDe(a) === form.unidade), [state.areas, form.unidade]);
+  const categoriasFormUnidade = useMemo(() => nomesCategoriasDaUnidade(state.categorias, form.unidade), [state.categorias, form.unidade]);
+  const [replyText, setReplyText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [erro, setErro] = useState("");
+  const [fotoBusy, setFotoBusy] = useState(false);
+  const fotoInputRef = useRef(null);
+  const scrollRef = useRef(null);
+
+  const ordenados = useMemo(() => [...chamados].sort((a, b) => new Date(b.criadoEm) - new Date(a.criadoEm)), [chamados]);
+  const selecionado = chamados.find((c) => c.id === selectedId) || null;
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [selecionado, selecionado && selecionado.mensagens.length]);
+
+  async function handleFoto(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setFotoBusy(true);
+    try {
+      const dataUrl = await resizeImageParaBase64(file, 800, 0.6);
+      setForm((prev) => ({ ...prev, foto: dataUrl }));
+    } catch (err) {}
+    setFotoBusy(false);
+    if (fotoInputRef.current) fotoInputRef.current.value = "";
+  }
+
+  async function enviarNovoChamado() {
+    const texto = form.texto.trim();
+    if (!texto) return;
+    setBusy(true);
+    setErro("");
+    const chamado = {
+      id: uid("CH"),
+      assunto: texto.length > 60 ? texto.slice(0, 57) + "..." : texto,
+      solicitante: userAuth.nome,
+      criadoPor: userAuth.nome,
+      tipo: form.tipo,
+      unidade: form.unidade || "colegio",
+      sala: form.sala,
+      categoria: form.categoria,
+      foto: form.foto || "",
+      status: "Aberto",
+      criadoEm: new Date().toISOString(),
+      mensagens: [{ autor: "solicitante", texto, data: new Date().toISOString() }],
+    };
+    try {
+      const res = await backendPost("novoChamado", { chamado, userNome: userAuth.nome, userSenha: userAuth.senha });
+      if (!res.ok) throw new Error(res.error || "Erro ao abrir chamado");
+      setState((prev) => ({ ...prev, chamados: [...(prev.chamados || []), chamado] }));
+      setNovoMode(false);
+      setForm(novoChamadoSolicitanteForm());
+      setSelectedId(chamado.id);
+    } catch (e) {
+      setErro("Não foi possível abrir o chamado. Tente novamente.");
+    }
+    setBusy(false);
+  }
+
+  async function enviarResposta() {
+    const texto = replyText.trim();
+    if (!texto || !selecionado) return;
+    setBusy(true);
+    setErro("");
+    const mensagem = { autor: "solicitante", texto, data: new Date().toISOString() };
+    try {
+      const res = await backendPost("novaMensagem", { chamadoId: selecionado.id, mensagem, userNome: userAuth.nome, userSenha: userAuth.senha });
+      if (!res.ok) throw new Error(res.error || "Erro ao enviar mensagem");
+      setState((prev) => ({
+        ...prev,
+        chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: [...c.mensagens, mensagem] } : c)),
+      }));
+      setReplyText("");
+    } catch (e) {
+      setErro("Não foi possível enviar. Tente novamente.");
+    }
+    setBusy(false);
+  }
+
+  const agora = new Date();
+  const dataFormatada = agora.toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const horaFormatada = agora.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+
+  return (
+    <div style={embedded ? {} : { minHeight: "100vh", background: COLORS.paper, fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif" }}>
+      {!embedded && <TopBarSolicitante nome={userAuth.nome} foto={userAuth.foto} onFotoChange={onFotoChange} onLogout={onLogout} />}
+      <div style={embedded ? {} : { padding: "14px 24px 16px", maxWidth: 1160, margin: "0 auto" }}>
+        <div
+          className="welcome-banner-solicitante"
+          style={{
+            background: `linear-gradient(120deg, ${COLORS.ink} 0%, #223454 100%)`,
+            borderRadius: 12,
+            padding: "14px 22px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 16,
+            marginBottom: 14,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 700, color: "#fff" }}>Bem-vindo(a), {userAuth.nome}</div>
+            <div style={{ fontSize: 12, color: "#E7C79A", fontWeight: 600, marginTop: 2 }}>{dataFormatada}, {horaFormatada}</div>
+          </div>
+          <Button variant="accent" icon={Plus} onClick={() => { setNovoMode(true); setSelectedId(null); }} style={{ flexShrink: 0 }}>
+            Novo chamado
+          </Button>
+        </div>
+
+        <div className="grid-chat" style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 16, height: 460 }}>
+          <Panel style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+            <div style={{ padding: "12px 14px", borderBottom: `1px solid ${COLORS.line}`, fontSize: 12.5, color: COLORS.inkSoft, fontWeight: 600 }}>
+              {ordenados.length} chamado{ordenados.length !== 1 ? "s" : ""}
+            </div>
+            <div style={{ overflow: "auto", flex: 1 }}>
+              {ordenados.length === 0 ? (
+                <EmptyState text="Nenhum chamado aberto ainda." />
+              ) : (
+                ordenados.map((c) => (
+                  <div
+                    key={c.id}
+                    onClick={() => { setSelectedId(c.id); setNovoMode(false); }}
+                    style={{ padding: "10px 14px", borderBottom: `1px solid ${COLORS.line}`, cursor: "pointer", background: selectedId === c.id ? COLORS.accentSoft : "transparent" }}
+                  >
+                    <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.ink, marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
+                      {c.assunto} <TipoChamadoBadge tipo={c.tipo} />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontSize: 11.5, color: COLORS.inkSoft }}>{c.sala || "Sem sala"}</span>
+                      <span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 999, color: CHAMADO_STATUS_COLORS[c.status], background: CHAMADO_STATUS_BG[c.status] }}>
+                        {c.status}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </Panel>
+
+          <Panel style={{ padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            {novoMode ? (
+              <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+                <div style={{ padding: "10px 18px", borderBottom: `1px solid ${COLORS.line}`, fontSize: 14, fontWeight: 700, color: COLORS.ink }}>Abrir novo chamado</div>
+                <div style={{ padding: 14, flex: 1, overflow: "auto" }}>
+                  <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                    <Field label="Tipo de chamado">
+                      <Select value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })}>
+                        {TIPO_CHAMADO_OPTIONS.map((t) => (
+                          <option key={t} value={t}>
+                            {t}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <Field label="Unidade">
+                      <Select value={form.unidade} onChange={(e) => setForm({ ...form, unidade: e.target.value, sala: "", categoria: "" })}>
+                        {UNIDADES.map((u) => (
+                          <option key={u.id} value={u.id}>
+                            {u.nome}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                  </div>
+                  <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                    <Field label="Sala relacionada (opcional)">
+                      <Select value={form.sala} onChange={(e) => setForm({ ...form, sala: e.target.value })}>
+                        <option value="">Nenhuma</option>
+                        {areasFormUnidade.map((a) => (
+                          <option key={a.id} value={a.nome}>{a.nome}</option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <Field label="Categoria relacionada (opcional)">
+                      <Select value={form.categoria} onChange={(e) => setForm({ ...form, categoria: e.target.value })}>
+                        <option value="">Nenhuma</option>
+                        {categoriasFormUnidade.map((c) => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </Select>
+                    </Field>
+                  </div>
+                  <Field
+                    label={
+                      form.tipo === "Problema técnico"
+                        ? "Descreva o problema"
+                        : form.tipo === "Solicitar"
+                        ? "Descreva sua solicitação"
+                        : "Descreva sua sugestão"
+                    }
+                  >
+                    <textarea
+                      value={form.texto}
+                      onChange={(e) => setForm({ ...form, texto: e.target.value })}
+                      rows={3}
+                      placeholder={
+                        form.tipo === "Problema técnico"
+                          ? "Ex: O projetor da sala 108 não liga mais..."
+                          : form.tipo === "Solicitar"
+                          ? "Ex: Precisamos de mais 2 mouses pra sala 104..."
+                          : "Ex: Seria bom ter um jeito de..."
+                      }
+                      style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }}
+                    />
+                  </Field>
+                  <div>
+                    <div style={{ fontSize: 13, color: COLORS.inkSoft, marginBottom: 4 }}>Foto (opcional)</div>
+                    <input ref={fotoInputRef} type="file" accept="image/*" onChange={handleFoto} style={{ display: "none" }} />
+                    <div style={{ display: "flex", gap: 8 }}>
+                      {form.foto && (
+                        <div style={{ width: 52, height: 52, borderRadius: 8, overflow: "hidden", border: `1px solid ${COLORS.line}`, position: "relative" }}>
+                          <img src={form.foto} alt="Foto anexada" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                          <button
+                            onClick={() => setForm((prev) => ({ ...prev, foto: "" }))}
+                            style={{ position: "absolute", top: 2, right: 2, background: "rgba(0,0,0,0.55)", border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", padding: 2 }}
+                            aria-label="Remover foto"
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      )}
+                      <button
+                        onClick={() => fotoInputRef.current && fotoInputRef.current.click()}
+                        disabled={fotoBusy}
+                        style={{
+                          width: 52,
+                          height: 52,
+                          borderRadius: 8,
+                          border: `1px dashed ${COLORS.lineStrong}`,
+                          background: "#fff",
+                          color: COLORS.inkSoft,
+                          display: "flex",
+                          flexDirection: "column",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 3,
+                          cursor: "pointer",
+                          fontSize: 9.5,
+                        }}
+                      >
+                        <Plus size={14} />
+                        {fotoBusy ? "..." : "Adicionar"}
+                      </button>
+                    </div>
+                  </div>
+                  {erro && <div style={{ color: COLORS.danger, fontSize: 13 }}>{erro}</div>}
+                </div>
+                <div style={{ padding: 10, borderTop: `1px solid ${COLORS.line}`, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                  {chamados.length > 0 && (
+                    <Button variant="ghost" onClick={() => setNovoMode(false)}>
+                      Cancelar
+                    </Button>
+                  )}
+                  <Button variant="primary" icon={Send} onClick={enviarNovoChamado} disabled={busy || !form.texto.trim()}>
+                    {busy ? "Enviando..." : "Abrir chamado"}
+                  </Button>
+                </div>
+              </div>
+            ) : !selecionado ? (
+              <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+                <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+                  <img src={LOGO_DATA_URL} alt="" style={{ width: 200, height: 200, opacity: 0.16 }} />
+                </div>
+                <div style={{ position: "relative", paddingTop: 40, textAlign: "center", color: COLORS.inkSoft, fontSize: 14 }}>
+                  <span className="texto-selecione-desktop">Selecione um chamado à esquerda ou abra um novo.</span>
+                  <span className="texto-selecione-mobile">Selecione um chamado acima ou abra um novo.</span>
+                </div>
+              </div>
+            ) : (
+              <div className="chamado-detail" style={{ display: "flex", height: "100%" }}>
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, borderRight: `1px solid ${COLORS.line}` }}>
+                  <div style={{ padding: "14px 18px", borderBottom: `1px solid ${COLORS.line}`, fontSize: 14, fontWeight: 700, color: COLORS.ink, display: "flex", alignItems: "center", gap: 8 }}>
+                    {selecionado.assunto} <TipoChamadoBadge tipo={selecionado.tipo} />
+                  </div>
+                  <div ref={scrollRef} style={{ flex: 1, overflow: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
+                    {selecionado.foto && (
+                      <div style={{ display: "flex", gap: 10 }}>
+                        <Avatar nome={userAuth.nome} foto={userAuth.foto} />
+                        <a href={selecionado.foto} target="_blank" rel="noreferrer">
+                          <img src={selecionado.foto} alt="Foto do chamado" style={{ width: 90, height: 90, borderRadius: 8, objectFit: "cover", border: `1px solid ${COLORS.line}` }} />
+                        </a>
+                      </div>
+                    )}
+                    {selecionado.mensagens.map((m, i) => {
+                      const abertura = i === 0;
+                      const nomeAutor = m.autor === "ti" ? m.nome || "Administrador" : userAuth.nome;
+                      const bg = abertura ? "#E3EEE9" : m.autor === "ti" ? "#F3E2C8" : "#fff";
+                      const borda = abertura ? "#2F6F5E" : m.autor === "ti" ? COLORS.accent : COLORS.line;
+                      return (
+                        <div key={i} style={{ display: "flex", gap: 10 }}>
+                          <Avatar nome={nomeAutor} foto={m.autor === "ti" ? undefined : userAuth.foto} />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ padding: "9px 13px", borderRadius: 10, borderLeft: `3px solid ${borda}`, fontSize: 13.5, background: bg, color: COLORS.ink }}>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.inkSoft, marginBottom: 3 }}>
+                                {nomeAutor} {abertura && <span style={{ color: "#2F6F5E" }}>· abriu o chamado</span>}
+                              </div>
+                              <div>{m.texto}</div>
+                            </div>
+                            <div style={{ fontSize: 10.5, color: COLORS.inkSoft, marginTop: 3, marginLeft: 4 }}>{formatDateTime(m.data)}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ padding: 14, borderTop: `1px solid ${COLORS.line}`, display: "flex", gap: 8 }}>
+                    <TextInput
+                      value={replyText}
+                      onChange={(e) => setReplyText(e.target.value)}
+                      placeholder="Escrever uma mensagem..."
+                      onKeyDown={(e) => e.key === "Enter" && enviarResposta()}
+                      style={{ flex: 1 }}
+                    />
+                    <Button variant="primary" icon={Send} onClick={enviarResposta} disabled={busy}>
+                      Enviar
+                    </Button>
+                  </div>
+                  {erro && <div style={{ color: COLORS.danger, fontSize: 13, padding: "0 14px 10px" }}>{erro}</div>}
+                </div>
+
+                <div style={{ width: 200, flexShrink: 0, padding: 16, overflow: "auto" }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 12 }}>Propriedades</div>
+                  {[
+                    ["Sala", selecionado.sala || "—"],
+                    ["Categoria", selecionado.categoria || "—"],
+                    ["Status", selecionado.status],
+                  ].map(([label, val]) => (
+                    <div key={label} style={{ marginBottom: 14 }}>
+                      <div style={{ fontSize: 11, color: COLORS.inkSoft }}>{label}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: label === "Status" ? CHAMADO_STATUS_COLORS[selecionado.status] : COLORS.ink, marginTop: 2 }}>{val}</div>
+                    </div>
+                  ))}
+                  <div>
+                    <div style={{ fontSize: 11, color: COLORS.inkSoft }}>Aberto</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.ink, marginTop: 2 }}>{tempoDecorrido(selecionado.criadoEm)}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </Panel>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(() => (typeof window !== "undefined" ? window.innerWidth <= 860 : false));
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 860px)");
+    const handler = (e) => setIsMobile(e.matches);
+    setIsMobile(mq.matches);
+    if (mq.addEventListener) mq.addEventListener("change", handler);
+    else mq.addListener(handler);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener("change", handler);
+      else mq.removeListener(handler);
+    };
+  }, []);
+  return isMobile;
+}
+
+const RESPONSIVE_CSS = `
+.app-topbar-mobile { display: none; }
+.texto-selecione-mobile { display: none; }
+@media (max-width: 860px) {
+  .app-topbar-mobile { display: flex !important; }
+  .texto-selecione-desktop { display: none !important; }
+  .texto-selecione-mobile { display: inline !important; }
+  .app-sidebar {
+    position: fixed !important;
+    top: 0; left: 0; bottom: 0;
+    z-index: 60;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 2px 0 16px rgba(0,0,0,0.25);
+  }
+  .app-sidebar.open { transform: translateX(0); }
+  .app-sidebar-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 55;
+  }
+  .app-main { width: 100%; padding: 16px !important; padding-top: 8px !important; }
+  .grid-2, .grid-3, .grid-4, .grid-5 { grid-template-columns: 1fr !important; }
+  .grid-chat { grid-template-columns: 1fr !important; height: auto !important; }
+  .grid-chat > div:first-child { height: 220px !important; }
+  .grid-chat > div:last-child { height: 480px !important; }
+  .chamado-detail { flex-direction: column !important; }
+  .chamado-detail > div:last-child { width: 100% !important; border-top: 1px solid #E1DDD0; border-right: none !important; }
+  .chamados-dock { display: none !important; }
+  .login-split { flex-direction: column !important; }
+  .login-brand-panel { width: 100% !important; min-width: 0 !important; padding: 28px 20px !important; }
+}
+`;
+
+// ---------- Administradores ----------
+
+const SECTION_LABELS = {
+  dashboard: "Painel",
+  inventario: "Inventário",
+  categorias: "Categorias",
+  areas: "Salas",
+  responsaveis: "Responsáveis",
+  relatorios: "Relatórios",
+  chamados: "Chamados",
+  importar: "Importar/Exportar",
+};
+
+// Chamados vem pré-marcado (abrir + responder + só os próprios) pra todo
+// admin restrito novo — pedido explícito: qualquer administrador criado daqui
+// pra frente (menos o de acesso total, que não precisa) já nasce só podendo
+// mexer nos chamados que ele mesmo abrir, sem precisar lembrar de marcar
+// manualmente toda vez.
+function emptyAdminForm() {
+  return { nome: "", senha: "", acessoTotal: true, secoes: {}, editar: false, podeAbrirChamados: true, podeResponderChamados: true, responderSoProprios: true };
+}
+
+function Administradores({ admins, secret, onAdminsChanged }) {
+  const [lista, setLista] = useState(admins || []);
+  const [modal, setModal] = useState(null); // { mode: 'new'|'edit', original, form }
+  const [error, setError] = useState("");
+  const [removeTarget, setRemoveTarget] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    setLista(admins || []);
+  }, [admins]);
+
+  function openNew() {
+    setModal({ mode: "new", form: emptyAdminForm() });
+    setError("");
+  }
+
+  function openEdit(a) {
+    const secoes = {};
+    if (a.permissoes !== "todas") {
+      a.permissoes.split(",").forEach((k) => (secoes[k.trim()] = true));
+    }
+    setModal({
+      mode: "edit",
+      original: a,
+      form: {
+        nome: a.nome,
+        senha: "",
+        acessoTotal: isAcessoTotal(a.permissoes),
+        secoes,
+        editar: !!a.editar,
+        podeAbrirChamados: a.podeAbrirChamados !== undefined ? !!a.podeAbrirChamados : !!a.editar,
+        podeResponderChamados: a.podeResponderChamados !== undefined ? !!a.podeResponderChamados : !!a.editar,
+        responderSoProprios: !!a.responderSoProprios,
+      },
+    });
+    setError("");
+  }
+
+  async function persistir(novaLista) {
+    setBusy(true);
+    setStatus(null);
+    try {
+      const res = await backendPost("salvarAdmins", { secret, admins: novaLista });
+      setLista(novaLista);
+      onAdminsChanged(novaLista);
+      setStatus({ type: "ok", msg: "Salvo com sucesso." });
+    } catch (e) {
+      setStatus({ type: "error", msg: "Não foi possível salvar. Tente novamente." });
+    }
+    setBusy(false);
+  }
+
+  function save() {
+    const f = modal.form;
+    const nome = f.nome.trim();
+    if (!nome) return setError("Informe o nome.");
+    if (modal.mode === "new" && !f.senha.trim()) return setError("Defina uma senha.");
+    const dupNome = lista.some((a) => a !== modal.original && a.nome.toLowerCase() === nome.toLowerCase());
+    if (dupNome) return setError("Já existe um administrador com esse nome.");
+
+    const secoesEscolhidas = Object.keys(f.secoes).filter((k) => f.secoes[k]);
+    if (!f.acessoTotal && secoesEscolhidas.length === 0) return setError("Selecione pelo menos uma seção, ou marque acesso total.");
+
+    const permissoes = f.acessoTotal ? "todas" : secoesEscolhidas.join(",");
+    const senhaFinal = f.senha.trim() ? f.senha.trim() : modal.original ? modal.original.senha : "";
+
+    const temChamados = f.acessoTotal || secoesEscolhidas.includes("chamados");
+    const novoAdmin = {
+      nome,
+      senha: senhaFinal,
+      permissoes,
+      editar: f.acessoTotal || !!f.editar,
+      podeAbrirChamados: f.acessoTotal || (temChamados && !!f.podeAbrirChamados),
+      podeResponderChamados: f.acessoTotal || (temChamados && !!f.podeResponderChamados),
+      responderSoProprios: temChamados && !!f.podeResponderChamados && !!f.responderSoProprios,
+    };
+    let novaLista;
+    if (modal.mode === "new") {
+      novaLista = [...lista, novoAdmin];
+    } else {
+      novaLista = lista.map((a) => (a === modal.original ? novoAdmin : a));
+    }
+    setModal(null);
+    persistir(novaLista);
+  }
+
+  function remove(a) {
+    const novaLista = lista.filter((x) => x !== a);
+    setRemoveTarget(null);
+    persistir(novaLista);
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: COLORS.ink }}>Administradores</h2>
+        <Button variant="primary" icon={Plus} onClick={openNew}>
+          Novo administrador
+        </Button>
+      </div>
+
+      <p style={{ fontSize: 13.5, color: COLORS.inkSoft, marginTop: 0, marginBottom: 16 }}>
+        Cada administrador entra com seu próprio nome e senha, e só vê no menu as seções que você marcar para ele. Por padrão, um administrador restrito só visualiza essas seções — marque "Pode editar" pra ele conseguir adicionar, alterar ou excluir. Quem tiver "acesso total" vê e edita tudo, e também pode gerenciar outros administradores.
+      </p>
+
+      {status && (
+        <div
+          style={{
+            marginBottom: 14,
+            padding: "10px 12px",
+            borderRadius: 6,
+            fontSize: 13,
+            background: status.type === "ok" ? "#E3EEE9" : COLORS.dangerSoft,
+            color: status.type === "ok" ? "#1F4D40" : COLORS.danger,
+          }}
+        >
+          {status.msg}
+        </div>
+      )}
+
+      <Panel>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${COLORS.lineStrong}` }}>
+              <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Nome</th>
+              <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Acesso</th>
+              <th style={{ padding: "8px 6px" }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {lista.map((a) => (
+              <tr key={a.nome} style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+                <td style={{ padding: "9px 6px", color: COLORS.ink, fontWeight: 600 }}>{a.nome}</td>
+                <td style={{ padding: "9px 6px", color: COLORS.inkSoft }}>
+                  {isAcessoTotal(a.permissoes) ? (
+                    "Acesso total"
+                  ) : (
+                    <>
+                      {a.permissoes
+                        .split(",")
+                        .map((k) => SECTION_LABELS[k.trim()] || k.trim())
+                        .join(", ")}
+                      <span
+                        style={{
+                          marginLeft: 8,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: "1px 7px",
+                          borderRadius: 999,
+                          color: a.editar ? COLORS.accent : COLORS.inkSoft,
+                          background: a.editar ? COLORS.accentSoft : COLORS.paper,
+                        }}
+                      >
+                        {a.editar ? "pode editar" : "só visualiza"}
+                      </span>
+                      {a.permissoes.split(",").some((k) => k.trim() === "chamados") && (
+                        <>
+                          {a.podeAbrirChamados && (
+                            <span
+                              style={{
+                                marginLeft: 6,
+                                fontSize: 11,
+                                fontWeight: 700,
+                                padding: "1px 7px",
+                                borderRadius: 999,
+                                color: COLORS.accent,
+                                background: COLORS.accentSoft,
+                              }}
+                            >
+                              abre chamados
+                            </span>
+                          )}
+                          {a.podeResponderChamados && (
+                            <span
+                              style={{
+                                marginLeft: 6,
+                                fontSize: 11,
+                                fontWeight: 700,
+                                padding: "1px 7px",
+                                borderRadius: 999,
+                                color: COLORS.accent,
+                                background: COLORS.accentSoft,
+                              }}
+                            >
+                              responde chamados
+                            </span>
+                          )}
+                          {a.podeResponderChamados && a.responderSoProprios && (
+                            <span
+                              style={{
+                                marginLeft: 6,
+                                fontSize: 11,
+                                fontWeight: 700,
+                                padding: "1px 7px",
+                                borderRadius: 999,
+                                color: COLORS.inkSoft,
+                                background: COLORS.paper,
+                              }}
+                            >
+                              só os próprios
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </>
+                  )}
+                </td>
+                <td style={{ padding: "9px 6px", textAlign: "right", whiteSpace: "nowrap" }}>
+                  <button onClick={() => openEdit(a)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.inkSoft, padding: 4 }} aria-label="Editar">
+                    <Pencil size={15} />
+                  </button>
+                  {lista.length > 1 && (
+                    <button onClick={() => setRemoveTarget(a)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.danger, padding: 4 }} aria-label="Excluir">
+                      <Trash2 size={15} />
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Panel>
+
+      {modal && (
+        <Modal title={modal.mode === "new" ? "Novo administrador" : "Editar administrador"} onClose={() => setModal(null)} width={460}>
+          <Field label="Nome">
+            <TextInput value={modal.form.nome} onChange={(e) => setModal({ ...modal, form: { ...modal.form, nome: e.target.value } })} />
+          </Field>
+          <Field label={modal.mode === "new" ? "Senha" : "Nova senha (deixe em branco para manter a atual)"}>
+            <TextInput type="text" value={modal.form.senha} onChange={(e) => setModal({ ...modal, form: { ...modal.form, senha: e.target.value } })} placeholder={modal.mode === "new" ? "" : "••••••••"} />
+          </Field>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={modal.form.acessoTotal}
+              onChange={(e) => setModal({ ...modal, form: { ...modal.form, acessoTotal: e.target.checked } })}
+            />
+            <span style={{ fontSize: 13.5, color: COLORS.ink }}>Acesso total (vê tudo e pode gerenciar administradores)</span>
+          </label>
+          {!modal.form.acessoTotal && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 13, color: COLORS.inkSoft, marginBottom: 6 }}>Seções que esse administrador pode ver:</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                {NAV_ITEMS.map((item) => (
+                  <label key={item.key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={!!modal.form.secoes[item.key]}
+                      onChange={(e) =>
+                        setModal({
+                          ...modal,
+                          form: { ...modal.form, secoes: { ...modal.form.secoes, [item.key]: e.target.checked } },
+                        })
+                      }
+                    />
+                    {item.label}
+                  </label>
+                ))}
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={!!modal.form.editar}
+                  onChange={(e) => setModal({ ...modal, form: { ...modal.form, editar: e.target.checked } })}
+                />
+                <span style={{ fontSize: 13.5, color: COLORS.ink }}>Pode editar (adicionar, alterar, excluir) nessas seções</span>
+              </label>
+              <p style={{ fontSize: 12, color: COLORS.inkSoft, marginTop: 4, marginBottom: 0 }}>
+                {modal.form.editar
+                  ? "Esse administrador pode alterar o que estiver nas seções marcadas acima."
+                  : modal.form.secoes.chamados
+                  ? "Desmarcado: esse administrador só visualiza as seções marcadas acima (menos Chamados, que tem as opções próprias abaixo)."
+                  : "Desmarcado: esse administrador só visualiza as seções marcadas acima, sem poder adicionar, editar ou excluir nada."}
+              </p>
+              {modal.form.secoes.chamados && (
+                <div
+                  style={{
+                    margin: "10px 0 4px 0",
+                    padding: "12px 14px",
+                    background: COLORS.paper,
+                    border: `1px solid ${COLORS.line}`,
+                    borderLeft: `3px solid ${COLORS.accent}`,
+                    borderRadius: 8,
+                  }}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.ink, marginBottom: 8 }}>Permissões de Chamados</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={!!modal.form.podeAbrirChamados}
+                      onChange={(e) => setModal({ ...modal, form: { ...modal.form, podeAbrirChamados: e.target.checked } })}
+                    />
+                    <span style={{ fontSize: 13, color: COLORS.ink }}>Pode abrir chamados</span>
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: modal.form.podeResponderChamados ? 8 : 0, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={!!modal.form.podeResponderChamados}
+                      onChange={(e) => setModal({ ...modal, form: { ...modal.form, podeResponderChamados: e.target.checked } })}
+                    />
+                    <span style={{ fontSize: 13, color: COLORS.ink }}>Pode responder chamados</span>
+                  </label>
+                  {modal.form.podeResponderChamados && (
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 24, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={!!modal.form.responderSoProprios}
+                        onChange={(e) => setModal({ ...modal, form: { ...modal.form, responderSoProprios: e.target.checked } })}
+                      />
+                      <span style={{ fontSize: 13, color: COLORS.ink }}>Só responde os chamados que ela mesma abriu</span>
+                    </label>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+          {error && <div style={{ color: COLORS.danger, fontSize: 13, marginBottom: 10 }}>{error}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
+            <Button variant="ghost" onClick={() => setModal(null)}>
+              Cancelar
+            </Button>
+            <Button variant="primary" icon={Check} onClick={save} disabled={busy}>
+              Salvar
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {removeTarget && (
+        <Modal title="Excluir administrador" onClose={() => setRemoveTarget(null)} width={380}>
+          <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+            Tem certeza que deseja excluir o administrador <strong>{removeTarget.nome}</strong>? Ele não vai mais conseguir entrar com essa senha.
+          </p>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button variant="ghost" onClick={() => setRemoveTarget(null)}>
+              Cancelar
+            </Button>
+            <Button variant="danger" icon={Trash2} onClick={() => remove(removeTarget)}>
+              Excluir
+            </Button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+const AUTORIZADO_PERMISSOES = "dashboard,categorias,areas,inventario";
+
+function emptyUsuarioForm() {
+  return { nome: "", email: "", senha: "", autorizado: false, autorizadoAbreChamados: false };
+}
+
+function Usuarios({ solicitantes, secret, onSolicitantesChanged }) {
+  const [lista, setLista] = useState(solicitantes || []);
+  const [modal, setModal] = useState(null); // { mode: 'new'|'edit', original, form }
+  const [error, setError] = useState("");
+  const [removeTarget, setRemoveTarget] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    setLista(solicitantes || []);
+  }, [solicitantes]);
+
+  function openNew() {
+    setModal({ mode: "new", form: emptyUsuarioForm() });
+    setError("");
+  }
+
+  function openEdit(u) {
+    setModal({
+      mode: "edit",
+      original: u,
+      form: { nome: u.nome, email: u.email || "", senha: "", autorizado: u.tipo === "autorizado", autorizadoAbreChamados: !!u.autorizadoAbreChamados },
+    });
+    setError("");
+  }
+
+  async function persistir(novaLista) {
+    setBusy(true);
+    setStatus(null);
+    try {
+      await backendPost("salvarSolicitantes", { secret, solicitantes: novaLista });
+      setLista(novaLista);
+      onSolicitantesChanged(novaLista);
+      setStatus({ type: "ok", msg: "Salvo com sucesso." });
+    } catch (e) {
+      setStatus({ type: "error", msg: "Não foi possível salvar. Tente novamente." });
+    }
+    setBusy(false);
+  }
+
+  function save() {
+    const f = modal.form;
+    const nome = f.nome.trim();
+    const email = f.email.trim();
+    if (!nome) return setError("Informe o nome.");
+    if (modal.mode === "new" && !f.senha.trim()) return setError("Defina uma senha.");
+    const dupNome = lista.some((u) => u !== modal.original && u.nome.toLowerCase() === nome.toLowerCase());
+    if (dupNome) return setError("Já existe um usuário com esse nome.");
+    const dupEmail = email && lista.some((u) => u !== modal.original && (u.email || "").toLowerCase() === email.toLowerCase());
+    if (dupEmail) return setError("Já existe um usuário com esse email.");
+
+    const senhaFinal = f.senha.trim() ? f.senha.trim() : modal.original ? modal.original.senha : "";
+    // Cadastro feito por um admin aqui já nasce aprovado — a aprovação só
+    // existe pra quem se cadastra sozinho (ver "Cadastre-se" na tela de
+    // login pública). Editar um pendente por aqui, sem passar pelo botão
+    // "Aprovar", mantém o "aprovado" que já estava (não usa esse modal pra
+    // aprovar ninguém, de propósito, pra não ser um clique acidental).
+    const aprovado = modal.original ? (modal.original.aprovado === undefined ? true : modal.original.aprovado) : true;
+    const novoUsuario = {
+      nome,
+      email,
+      senha: senhaFinal,
+      tipo: f.autorizado ? "autorizado" : "solicitante",
+      foto: modal.original ? modal.original.foto || "" : "",
+      aprovado,
+      autorizadoAbreChamados: f.autorizado && !!f.autorizadoAbreChamados,
+    };
+    let novaLista;
+    if (modal.mode === "new") {
+      novaLista = [...lista, novoUsuario];
+    } else {
+      novaLista = lista.map((u) => (u === modal.original ? novoUsuario : u));
+    }
+    setModal(null);
+    persistir(novaLista);
+  }
+
+  function remove(u) {
+    const novaLista = lista.filter((x) => x !== u);
+    setRemoveTarget(null);
+    persistir(novaLista);
+  }
+
+  function aprovar(u) {
+    const novaLista = lista.map((x) => (x === u ? { ...x, aprovado: true } : x));
+    persistir(novaLista);
+  }
+
+  const pendentes = lista.filter((u) => u.aprovado === false);
+  const aprovados = lista.filter((u) => u.aprovado !== false);
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: COLORS.ink }}>Usuários</h2>
+        <Button variant="primary" icon={Plus} onClick={openNew}>
+          Novo usuário
+        </Button>
+      </div>
+
+      <p style={{ fontSize: 13.5, color: COLORS.inkSoft, marginTop: 0, marginBottom: 16 }}>
+        Além de um administrador criar acesso aqui direto, qualquer pessoa pode se cadastrar sozinha (nome, email e senha) na tela de login pública — mas o cadastro só fica ativo depois de aprovado aqui embaixo. Cada usuário entra com o nome (ou email) e a senha cadastrados, na mesma tela de login pública (não é um administrador). Por padrão ele abre e acompanha chamados; marcando "Autorizado", ele passa a só visualizar Painel, Categorias, Salas e Inventário, sem poder abrir chamado nem editar nada.
+      </p>
+
+      {status && (
+        <div
+          style={{
+            marginBottom: 14,
+            padding: "10px 12px",
+            borderRadius: 6,
+            fontSize: 13,
+            background: status.type === "ok" ? "#E3EEE9" : COLORS.dangerSoft,
+            color: status.type === "ok" ? "#1F4D40" : COLORS.danger,
+          }}
+        >
+          {status.msg}
+        </div>
+      )}
+
+      {pendentes.length > 0 && (
+        <Panel title={`Aguardando aprovação (${pendentes.length})`} style={{ marginBottom: 16, border: `1px solid ${COLORS.accent}` }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${COLORS.lineStrong}` }}>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Nome</th>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Email</th>
+                <th style={{ padding: "8px 6px" }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {pendentes.map((u) => (
+                <tr key={u.nome} style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+                  <td style={{ padding: "9px 6px", color: COLORS.ink, fontWeight: 600 }}>{u.nome}</td>
+                  <td style={{ padding: "9px 6px", color: COLORS.inkSoft }}>{u.email || "—"}</td>
+                  <td style={{ padding: "9px 6px", textAlign: "right", whiteSpace: "nowrap" }}>
+                    <Button variant="primary" icon={Check} onClick={() => aprovar(u)} disabled={busy} style={{ marginRight: 6 }}>
+                      Aprovar
+                    </Button>
+                    <Button variant="ghost" icon={X} onClick={() => setRemoveTarget(u)} disabled={busy}>
+                      Recusar
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      )}
+
+      <Panel>
+        {aprovados.length === 0 ? (
+          <EmptyState text="Nenhum usuário cadastrado ainda." />
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${COLORS.lineStrong}` }}>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Nome</th>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Email</th>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: COLORS.inkSoft, fontSize: 12 }}>Acesso</th>
+                <th style={{ padding: "8px 6px" }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {aprovados.map((u) => (
+                <tr key={u.nome} style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+                  <td style={{ padding: "9px 6px", color: COLORS.ink, fontWeight: 600 }}>{u.nome}</td>
+                  <td style={{ padding: "9px 6px", color: COLORS.inkSoft }}>{u.email || "—"}</td>
+                  <td style={{ padding: "9px 6px" }}>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        padding: "1px 7px",
+                        borderRadius: 999,
+                        color: u.tipo === "autorizado" ? COLORS.accent : COLORS.inkSoft,
+                        background: u.tipo === "autorizado" ? COLORS.accentSoft : COLORS.paper,
+                      }}
+                    >
+                      {u.tipo === "autorizado" ? "autorizado · só visualização" : "abre chamados"}
+                    </span>
+                    {u.tipo === "autorizado" && u.autorizadoAbreChamados && (
+                      <span
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: "1px 7px",
+                          borderRadius: 999,
+                          color: COLORS.inkSoft,
+                          background: COLORS.paper,
+                          marginLeft: 6,
+                        }}
+                      >
+                        + abre chamados
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ padding: "9px 6px", textAlign: "right", whiteSpace: "nowrap" }}>
+                    <button onClick={() => openEdit(u)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.inkSoft, padding: 4 }} aria-label="Editar">
+                      <Pencil size={15} />
+                    </button>
+                    <button onClick={() => setRemoveTarget(u)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.danger, padding: 4 }} aria-label="Excluir">
+                      <Trash2 size={15} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+
+      {modal && (
+        <Modal title={modal.mode === "new" ? "Novo usuário" : "Editar usuário"} onClose={() => setModal(null)} width={400}>
+          <Field label="Nome">
+            <TextInput value={modal.form.nome} onChange={(e) => setModal({ ...modal, form: { ...modal.form, nome: e.target.value } })} />
+          </Field>
+          <Field label="Email (opcional — dá pra entrar com ele também)">
+            <TextInput type="email" value={modal.form.email} onChange={(e) => setModal({ ...modal, form: { ...modal.form, email: e.target.value } })} />
+          </Field>
+          <Field label={modal.mode === "new" ? "Senha" : "Nova senha (deixe em branco para manter a atual)"}>
+            <TextInput type="text" value={modal.form.senha} onChange={(e) => setModal({ ...modal, form: { ...modal.form, senha: e.target.value } })} placeholder={modal.mode === "new" ? "" : "••••••••"} />
+          </Field>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, marginBottom: 4, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={!!modal.form.autorizado}
+              onChange={(e) => setModal({ ...modal, form: { ...modal.form, autorizado: e.target.checked } })}
+            />
+            <span style={{ fontSize: 13.5, color: COLORS.ink }}>Autorizado (só visualização)</span>
+          </label>
+          <p style={{ fontSize: 12, color: COLORS.inkSoft, marginTop: 0, marginBottom: modal.form.autorizado ? 8 : 12 }}>
+            {modal.form.autorizado
+              ? "Esse usuário só visualiza Painel, Categorias, Salas e Inventário, sem editar nada."
+              : "Desmarcado: esse usuário entra normalmente pra abrir e acompanhar seus chamados."}
+          </p>
+          {modal.form.autorizado && (
+            <>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 22, marginBottom: 4, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={!!modal.form.autorizadoAbreChamados}
+                  onChange={(e) => setModal({ ...modal, form: { ...modal.form, autorizadoAbreChamados: e.target.checked } })}
+                />
+                <span style={{ fontSize: 13.5, color: COLORS.ink }}>Também pode abrir chamados</span>
+              </label>
+              <p style={{ fontSize: 12, color: COLORS.inkSoft, marginTop: 0, marginLeft: 22, marginBottom: 12 }}>
+                {modal.form.autorizadoAbreChamados
+                  ? "Ganha a aba Chamados, pra abrir e acompanhar os PRÓPRIOS chamados — continua sem editar o resto."
+                  : "Desmarcado: continua sem chamado nenhum, só visualização no resto."}
+              </p>
+            </>
+          )}
+          {error && <div style={{ color: COLORS.danger, fontSize: 13, marginBottom: 10 }}>{error}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
+            <Button variant="ghost" onClick={() => setModal(null)}>
+              Cancelar
+            </Button>
+            <Button variant="primary" icon={Check} onClick={save} disabled={busy}>
+              Salvar
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {removeTarget && (
+        <Modal title={removeTarget.aprovado === false ? "Recusar cadastro" : "Excluir usuário"} onClose={() => setRemoveTarget(null)} width={380}>
+          <p style={{ fontSize: 14, color: COLORS.ink, marginTop: 0 }}>
+            {removeTarget.aprovado === false ? (
+              <>
+                Tem certeza que deseja recusar o cadastro de <strong>{removeTarget.nome}</strong>? O pedido é removido e ele(a) não vai conseguir entrar.
+              </>
+            ) : (
+              <>
+                Tem certeza que deseja excluir o usuário <strong>{removeTarget.nome}</strong>? Ele não vai mais conseguir entrar com essa senha.
+              </>
+            )}
+          </p>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button variant="ghost" onClick={() => setRemoveTarget(null)}>
+              Cancelar
+            </Button>
+            <Button variant="danger" icon={Trash2} onClick={() => remove(removeTarget)}>
+              {removeTarget.aprovado === false ? "Recusar" : "Excluir"}
+            </Button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+const SECRET_STORAGE_KEY = "inventario-ti-secret";
+const USER_STORAGE_KEY = "inventario-ti-user";
+
+function LoadingScreen() {
+  return (
+    <div style={{ padding: 60, textAlign: "center", color: COLORS.inkSoft, fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
+      Carregando inventário...
+    </div>
+  );
+}
+
+const DOCK_COLLAPSED_STORAGE_KEY = "inventario-ti-dock-collapsed";
+
+function ChamadosDock({ state, setState, abertoId, onAbrirChange, secret, podeResponderChamados = true, responderSoProprios = false, meuNome = "", fotosSolicitantes = {} }) {
+  const [texto, setTexto] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [erro, setErro] = useState("");
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(DOCK_COLLAPSED_STORAGE_KEY) === "1";
+    } catch (e) {
+      return false;
+    }
+  });
+  const abertos = useMemo(
+    () => (state.chamados || []).filter((c) => c.status === "Aberto" || c.status === "Em andamento"),
+    [state.chamados]
+  );
+  const selecionado = abertos.find((c) => c.id === abertoId) || null;
+
+  function podeMexerNesseChamado(chamado) {
+    if (!podeResponderChamados) return false;
+    if (!responderSoProprios) return true;
+    return chamado && chamado.abertoPorAdmin === meuNome;
+  }
+
+  function toggleCollapsed() {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(DOCK_COLLAPSED_STORAGE_KEY, next ? "1" : "0");
+      } catch (e) {}
+      return next;
+    });
+  }
+
+  async function enviarResposta() {
+    if (!podeMexerNesseChamado(selecionado)) return;
+    const valor = texto.trim();
+    if (!valor || !selecionado) return;
+    const mensagem = { autor: "ti", nome: meuNome, texto: valor, data: new Date().toISOString() };
+    setBusy(true);
+    setErro("");
+    try {
+      const res = await backendPost("novaMensagem", { chamadoId: selecionado.id, mensagem, secret });
+      if (!res.ok) throw new Error(res.error || "Erro ao enviar mensagem");
+      setState((prev) => ({
+        ...prev,
+        chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: [...c.mensagens, mensagem] } : c)),
+      }));
+      setTexto("");
+    } catch (e) {
+      setErro("Não foi possível enviar. Tente novamente.");
+    }
+    setBusy(false);
+  }
+
+  if (!selecionado && abertos.length === 0) return null;
+
+  if (collapsed) {
+    return (
+      <div
+        style={{
+          width: 56,
+          flexShrink: 0,
+          background: "#fff",
+          borderLeft: `1px solid ${COLORS.line}`,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          padding: "16px 0",
+          gap: 16,
+          boxShadow: "-4px 0 16px rgba(22,35,61,0.06)",
+        }}
+      >
+        <button
+          onClick={toggleCollapsed}
+          title="Expandir chamados"
+          aria-label="Expandir chamados"
+          style={{ background: "none", border: `1px solid ${COLORS.lineStrong}`, borderRadius: 6, cursor: "pointer", color: COLORS.inkSoft, padding: 6, display: "flex" }}
+        >
+          <ChevronLeft size={16} />
+        </button>
+        <div style={{ position: "relative", display: "flex" }}>
+          <MessageSquare size={20} style={{ color: COLORS.inkSoft }} />
+          {abertos.length > 0 && (
+            <span
+              style={{
+                position: "absolute",
+                top: -7,
+                right: -9,
+                fontSize: 10,
+                fontWeight: 700,
+                minWidth: 15,
+                height: 15,
+                borderRadius: 999,
+                background: COLORS.accent,
+                color: "#fff",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "0 3px",
+              }}
+            >
+              {abertos.length}
+            </span>
+          )}
+        </div>
+        <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 11, fontWeight: 600, color: COLORS.inkSoft, letterSpacing: 0.2 }}>Chamados</div>
+      </div>
+    );
+  }
+
+  if (selecionado) {
+    return (
+      <div className="chamados-dock" style={{ width: 320, flexShrink: 0, background: "#fff", borderLeft: `1px solid ${COLORS.line}`, display: "flex", flexDirection: "column", boxShadow: "-4px 0 16px rgba(22,35,61,0.06)" }}>
+        <div style={{ padding: "12px 16px", borderBottom: `1px solid ${COLORS.line}`, display: "flex", alignItems: "center", gap: 8 }}>
+          <button onClick={() => onAbrirChange(null)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.inkSoft, padding: 2, display: "flex" }} aria-label="Voltar para a lista">
+            <ChevronLeft size={18} />
+          </button>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: COLORS.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selecionado.assunto}</div>
+            <div style={{ fontSize: 11, color: COLORS.inkSoft }}>{selecionado.solicitante || "Solicitante"} · {selecionado.sala || "Sem sala"} · {tempoDecorrido(selecionado.criadoEm)}</div>
+          </div>
+          <button
+            onClick={toggleCollapsed}
+            title="Recolher chamados"
+            aria-label="Recolher chamados"
+            style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.inkSoft, padding: 2, display: "flex", flexShrink: 0 }}
+          >
+            <ChevronRight size={18} />
+          </button>
+        </div>
+        <div style={{ flex: 1, overflow: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 12, maxHeight: 420 }}>
+          {selecionado.mensagens.map((m, i) => {
+            const abertura = i === 0;
+            const nomeAutor = m.autor === "ti" ? m.nome || "Administrador" : selecionado.solicitante || "Solicitante";
+            const bg = abertura ? "#E3EEE9" : m.autor === "ti" ? COLORS.accentSoft : "#fff";
+            const borda = abertura ? "#2F6F5E" : m.autor === "ti" ? COLORS.accent : COLORS.line;
+            return (
+              <div key={i} style={{ display: "flex", gap: 9 }}>
+                <Avatar nome={nomeAutor} foto={m.autor === "ti" ? undefined : fotosSolicitantes[selecionado.solicitante]} size={26} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ padding: "9px 12px", borderRadius: 10, borderLeft: `3px solid ${borda}`, fontSize: 13, background: bg, color: COLORS.ink }}>
+                    <div style={{ fontSize: 10.5, fontWeight: 700, color: COLORS.inkSoft, marginBottom: 3 }}>
+                      {nomeAutor} {abertura && <span style={{ color: "#2F6F5E" }}>· abriu o chamado</span>}
+                    </div>
+                    <div>{m.texto}</div>
+                  </div>
+                  <div style={{ fontSize: 10, color: COLORS.inkSoft, marginTop: 3, marginLeft: 3 }}>{formatDateTime(m.data)}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {podeMexerNesseChamado(selecionado) && (
+          <div style={{ padding: 12, borderTop: `1px solid ${COLORS.line}` }}>
+            {erro && <div style={{ color: COLORS.danger, fontSize: 12, marginBottom: 6 }}>{erro}</div>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <TextInput
+                value={texto}
+                onChange={(e) => setTexto(e.target.value)}
+                placeholder="Responder..."
+                onKeyDown={(e) => e.key === "Enter" && enviarResposta()}
+                style={{ flex: 1, minWidth: 0 }}
+              />
+              <Button variant="primary" icon={Send} onClick={enviarResposta} disabled={busy}>
+                Enviar
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="chamados-dock" style={{ width: 320, flexShrink: 0, background: "#fff", borderLeft: `1px solid ${COLORS.line}`, display: "flex", flexDirection: "column", boxShadow: "-4px 0 16px rgba(22,35,61,0.06)" }}>
+      <div style={{ padding: "14px 16px", borderBottom: `1px solid ${COLORS.line}`, fontSize: 13.5, fontWeight: 700, color: COLORS.ink, display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ flex: 1 }}>Chamados em aberto</span>
+        <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: COLORS.accentSoft, color: COLORS.accent }}>{abertos.length}</span>
+        <button
+          onClick={toggleCollapsed}
+          title="Recolher chamados"
+          aria-label="Recolher chamados"
+          style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.inkSoft, padding: 2, display: "flex", flexShrink: 0 }}
+        >
+          <ChevronRight size={18} />
+        </button>
+      </div>
+      <div style={{ flex: 1, overflow: "auto" }}>
+        {abertos.map((c) => {
+          const ultima = c.mensagens[c.mensagens.length - 1];
+          const naoLido = ultima.autor === "solicitante";
+          return (
+            <div
+              key={c.id}
+              onClick={() => onAbrirChange(c.id)}
+              style={{ display: "flex", gap: 10, padding: "12px 16px", borderBottom: `1px solid ${COLORS.line}`, cursor: "pointer" }}
+            >
+              <Avatar nome={c.solicitante || "?"} foto={fotosSolicitantes[c.solicitante]} size={32} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: COLORS.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.solicitante || "Solicitante"}</div>
+                  <div style={{ fontSize: 10.5, color: COLORS.inkSoft, flexShrink: 0 }}>{tempoDecorrido(c.criadoEm)}</div>
+                </div>
+                <div style={{ fontSize: 11.5, color: COLORS.ink, fontWeight: 600, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.assunto}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 3 }}>
+                  <div style={{ fontSize: 11, color: COLORS.inkSoft, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                    {ultima.autor === "ti" ? "Você: " : ""}{ultima.texto}
+                  </div>
+                  {naoLido && <span style={{ width: 8, height: 8, borderRadius: "50%", background: COLORS.danger, flexShrink: 0, marginLeft: 6 }} />}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [secret, setSecret] = useState("");
+  const [auth, setAuth] = useState(null); // { isAdmin, nome, permissoes }
+  const [userAuth, setUserAuth] = useState(null); // { nome, senha } — solicitante logado
+  const [admins, setAdmins] = useState([]);
+  const [usuarios, setUsuarios] = useState([]);
+  const [fotosSolicitantes, setFotosSolicitantes] = useState({});
+  const [historico, setHistorico] = useState([]);
+  const [state, setState] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(null);
+  const [loadErrorDetail, setLoadErrorDetail] = useState(null);
+  const [view, setView] = useState("dashboard");
+  const [chamadoAbertoId, setChamadoAbertoId] = useState(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [pendingPatrimonio, setPendingPatrimonio] = useState(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("patrimonio") || null;
+    } catch (e) {
+      return null;
+    }
+  });
+  const [pendingCategoriaFiltro, setPendingCategoriaFiltro] = useState(null);
+  const [pendingStatusFiltro, setPendingStatusFiltro] = useState(null);
+  const [pendingTipoAreaFiltro, setPendingTipoAreaFiltro] = useState(null);
+  const [unidadeAtiva, setUnidadeAtiva] = useState("colegio");
+  const saveTimer = useRef(null);
+
+  function aplicarLoginAdmin(data, senhaUsada) {
+    setAuth({
+      isAdmin: true,
+      nome: data.nome || "Administrador",
+      permissoes: data.permissoes || "todas",
+      editar: !!data.editar,
+      podeAbrirChamados: data.podeAbrirChamados,
+      podeResponderChamados: data.podeResponderChamados,
+      responderSoProprios: data.responderSoProprios,
+    });
+    setAdmins(data.admins || []);
+    setUsuarios(data.solicitantes || []);
+    setFotosSolicitantes(data.fotosSolicitantes || {});
+    setHistorico(data.historico || []);
+    setUserAuth(null);
+    try {
+      localStorage.removeItem(USER_STORAGE_KEY);
+    } catch (e) {}
+    setState({
+      prefixo: "CES",
+      categorias: [],
+      areas: [],
+      responsaveis: [],
+      inventario: [],
+      chamados: [],
+      ...data.state,
+      categorias: normalizarCategorias((data.state && data.state.categorias) || []),
+    });
+    setSecret(senhaUsada);
+    try {
+      localStorage.setItem(SECRET_STORAGE_KEY, senhaUsada);
+    } catch (e) {}
+    const allowed = getAllowedSections(data.permissoes || "todas");
+    if (pendingPatrimonio && allowed.includes("inventario")) {
+      setView("inventario");
+    } else {
+      setView(allowed.includes("dashboard") ? "dashboard" : allowed[0] || "chamados");
+    }
+  }
+
+  function aplicarLoginUsuario(userCreds, estadoUsuario, isAutorizado, foto, podeAbrirChamados) {
+    setAuth(
+      isAutorizado
+        ? {
+            isAdmin: false,
+            isAutorizado: true,
+            nome: userCreds.nome,
+            permissoes: AUTORIZADO_PERMISSOES + (podeAbrirChamados ? ",chamados" : ""),
+            editar: false,
+            podeAbrirChamados: !!podeAbrirChamados,
+          }
+        : { isAdmin: false }
+    );
+    setUserAuth({ ...userCreds, foto: foto || "" });
+    setState(estadoUsuario);
+    setView("dashboard");
+    try {
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(userCreds));
+    } catch (e) {}
+  }
+
+  async function atualizarMinhaFoto(novaFoto) {
+    const res = await backendPost("atualizarFotoUsuario", { userNome: userAuth.nome, userSenha: userAuth.senha, foto: novaFoto });
+    if (!res.ok) throw new Error(res.error || "Não foi possível salvar a foto");
+    setUserAuth((prev) => ({ ...prev, foto: novaFoto }));
+  }
+
+  function logoutUsuario() {
+    try {
+      localStorage.removeItem(USER_STORAGE_KEY);
+    } catch (e) {}
+    setUserAuth(null);
+    setAuth(null);
+    setState(null);
+    setLoaded(false);
+    carregarInicial();
+  }
+
+  async function carregarInicial() {
+    let savedSecret = "";
+    let savedUser = null;
+    try {
+      savedSecret = localStorage.getItem(SECRET_STORAGE_KEY) || "";
+    } catch (e) {}
+    try {
+      const raw = localStorage.getItem(USER_STORAGE_KEY);
+      if (raw) savedUser = JSON.parse(raw);
+    } catch (e) {}
+
+    try {
+      if (savedSecret) {
+        const data = await backendGet(savedSecret);
+        if (!data.ok) throw new Error(data.error || "Erro desconhecido");
+        if (data.isAdmin) {
+          aplicarLoginAdmin(data, savedSecret);
+          setLoaded(true);
+          return;
+        }
+        try {
+          localStorage.removeItem(SECRET_STORAGE_KEY);
+        } catch (e) {}
+      }
+
+      if (savedUser && savedUser.nome) {
+        const data = await backendGetUser(savedUser.nome, savedUser.senha || "");
+        if (!data.ok) throw new Error(data.error || "Erro desconhecido");
+        if (data.isUser) {
+          aplicarLoginUsuario({ nome: data.nome, senha: savedUser.senha }, data.state, !!data.isAutorizado, data.foto || "", !!data.podeAbrirChamados);
+          setLoaded(true);
+          return;
+        }
+        try {
+          localStorage.removeItem(USER_STORAGE_KEY);
+        } catch (e) {}
+      }
+
+      setAuth({ isAdmin: false });
+      setUserAuth(null);
+      setState(null);
+      setLoaded(true);
+    } catch (e) {
+      setLoadError("Não foi possível conectar ao servidor do inventário. Veja o detalhe técnico abaixo — tire um print e me mande.");
+      setLoadErrorDetail(String((e && e.message) || e));
+      setLoaded(true);
+    }
+  }
+
+  useEffect(() => {
+    let mounted = true;
+    carregarInicial().then(() => {
+      if (!mounted) return;
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!loaded || !state || !auth || !auth.isAdmin) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      backendPost("salvarTudo", { state, secret }).catch(() => {});
+    }, 600);
+    return () => clearTimeout(saveTimer.current);
+  }, [state, loaded, auth, secret]);
+
+  // Enquanto o admin está logado, os chamados passam a vir ao vivo do
+  // Firestore (se configurado) em vez de só na hora do login — é o que faz
+  // um chamado aberto por outra pessoa aparecer sozinho, sem precisar
+  // recarregar a página. Se o Firebase não estiver configurado, essa
+  // assinatura simplesmente não faz nada (ver assinarChamadosAoVivo).
+  useEffect(() => {
+    if (!auth || !auth.isAdmin) return;
+    const cancelar = assinarChamadosAoVivo((chamadosAoVivo) => {
+      setState((prev) => (prev ? { ...prev, chamados: chamadosAoVivo } : prev));
+    });
+    return cancelar;
+  }, [auth && auth.isAdmin]);
+
+  function logout() {
+    try {
+      localStorage.removeItem(SECRET_STORAGE_KEY);
+    } catch (e) {}
+    setSecret("");
+    setAuth(null);
+    setState(null);
+    setLoaded(false);
+    carregarInicial();
+  }
+
+  if (!loaded) {
+    return <LoadingScreen />;
+  }
+
+  if (loadError) {
+    return <ErrorScreen msg={loadError} detail={loadErrorDetail} />;
+  }
+
+  if (!auth.isAdmin && !auth.isAutorizado) {
+    if (!userAuth) {
+      return (
+        <>
+          <style>{RESPONSIVE_CSS}</style>
+          <LoginPublico onLoggedIn={aplicarLoginUsuario} onLoggedInAdmin={aplicarLoginAdmin} />
+        </>
+      );
+    }
+
+    return (
+      <>
+        <style>{RESPONSIVE_CSS}</style>
+        <ChamadosSolicitante state={state} setState={setState} userAuth={userAuth} onLogout={logoutUsuario} onFotoChange={atualizarMinhaFoto} />
+      </>
+    );
+  }
+
+  const NAV_TITLES = {
+    dashboard: "Painel",
+    inventario: "Inventário",
+    categorias: "Categorias",
+    areas: "Salas",
+    responsaveis: "Responsáveis",
+    relatorios: "Relatórios",
+    chamados: "Chamados",
+    importar: "Importar/Exportar",
+    usuarios: "Usuários",
+    administradores: "Administradores",
+  };
+
+  const isMaster = isAcessoTotal(auth.permissoes);
+  const allowed = new Set(getAllowedSections(auth.permissoes));
+  const podeEditar = isMaster || !!auth.editar;
+  const podeAbrirChamados = isMaster || (auth.podeAbrirChamados !== undefined ? !!auth.podeAbrirChamados : !!auth.editar);
+  const podeResponderChamados = isMaster || (auth.podeResponderChamados !== undefined ? !!auth.podeResponderChamados : !!auth.editar);
+  const responderSoProprios = !isMaster && !!auth.responderSoProprios;
+
+  return (
+    <div style={{ minHeight: 640, background: COLORS.paper, fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif" }}>
+      <style>{RESPONSIVE_CSS}</style>
+      <div className="app-topbar-mobile" style={{ alignItems: "center", gap: 10, padding: "12px 16px", background: COLORS.ink, color: "#fff", position: "sticky", top: 0, zIndex: 30 }}>
+        <button
+          onClick={() => setMobileMenuOpen(true)}
+          style={{ background: "none", border: "none", color: "#fff", padding: 4, cursor: "pointer", display: "flex" }}
+          aria-label="Abrir menu"
+        >
+          <Menu size={22} />
+        </button>
+        <span style={{ fontSize: 15, fontWeight: 700 }}>{NAV_TITLES[view] || "Inventário de TI"}</span>
+      </div>
+
+      {mobileMenuOpen && <div className="app-sidebar-backdrop" onClick={() => setMobileMenuOpen(false)} />}
+
+      <div style={{ display: "flex", minHeight: 640 }}>
+        <Sidebar
+          view={view}
+          mobileOpen={mobileMenuOpen}
+          nome={auth.nome}
+          permissoes={auth.permissoes}
+          podeEditar={podeEditar}
+          onLogout={auth.isAdmin ? logout : logoutUsuario}
+          categorias={state.categorias}
+          unidadeAtiva={unidadeAtiva}
+          onNavigate={(key) => {
+            setView(key);
+            setMobileMenuOpen(false);
+          }}
+          onNavigateCategoria={(cat) => {
+            setPendingCategoriaFiltro(cat);
+            setView("inventario");
+            setMobileMenuOpen(false);
+          }}
+        />
+        <main className="app-main" style={{ flex: 1, padding: 28, overflow: "auto" }}>
+          {["dashboard", "inventario", "categorias", "areas", "responsaveis", "chamados", "importar"].includes(view) &&
+            !(view === "chamados" && auth.isAutorizado) && <UnidadeTabs unidade={unidadeAtiva} onChange={setUnidadeAtiva} />}
+          {view === "dashboard" && allowed.has("dashboard") && (
+            <Dashboard
+              state={state}
+              setView={setView}
+              unidadeAtiva={unidadeAtiva}
+              onAbrirChamado={setChamadoAbertoId}
+              onFiltrarStatus={(status) => setPendingStatusFiltro(status)}
+              onFiltrarTipoArea={(tipo) => setPendingTipoAreaFiltro(tipo)}
+            />
+          )}
+          {view === "inventario" && allowed.has("inventario") && (
+            <Inventario
+              state={state}
+              setState={setState}
+              unidadeAtiva={unidadeAtiva}
+              pendingPatrimonio={pendingPatrimonio}
+              onConsumePending={() => setPendingPatrimonio(null)}
+              pendingCategoriaFiltro={pendingCategoriaFiltro}
+              onConsumeCategoriaFiltro={() => setPendingCategoriaFiltro(null)}
+              pendingStatusFiltro={pendingStatusFiltro}
+              onConsumeStatusFiltro={() => setPendingStatusFiltro(null)}
+              podeEditar={podeEditar}
+            />
+          )}
+          {view === "categorias" && allowed.has("categorias") && <Categorias state={state} setState={setState} unidadeAtiva={unidadeAtiva} podeEditar={podeEditar} />}
+          {view === "areas" && allowed.has("areas") && (
+            <Areas
+              state={state}
+              setState={setState}
+              unidadeAtiva={unidadeAtiva}
+              podeEditar={podeEditar}
+              pendingTipoFiltro={pendingTipoAreaFiltro}
+              onConsumeTipoFiltro={() => setPendingTipoAreaFiltro(null)}
+            />
+          )}
+          {view === "responsaveis" && allowed.has("responsaveis") && <Responsaveis state={state} setState={setState} unidadeAtiva={unidadeAtiva} podeEditar={podeEditar} />}
+          {view === "relatorios" && allowed.has("relatorios") && <Relatorios state={state} historico={historico} />}
+          {view === "chamados" && allowed.has("chamados") && auth.isAdmin && (
+            <Chamados
+              state={state}
+              setState={setState}
+              unidadeAtiva={unidadeAtiva}
+              secret={secret}
+              podeAbrirChamados={podeAbrirChamados}
+              podeResponderChamados={podeResponderChamados}
+              responderSoProprios={responderSoProprios}
+              meuNome={auth.nome}
+              fotosSolicitantes={fotosSolicitantes}
+            />
+          )}
+          {view === "chamados" && allowed.has("chamados") && auth.isAutorizado && (
+            <ChamadosSolicitante state={state} setState={setState} userAuth={userAuth} onLogout={logoutUsuario} onFotoChange={atualizarMinhaFoto} embedded />
+          )}
+          {view === "importar" && allowed.has("importar") && <Importar state={state} setState={setState} unidadeAtiva={unidadeAtiva} secret={secret} podeEditar={podeEditar} />}
+          {view === "usuarios" && isMaster && <Usuarios solicitantes={usuarios} secret={secret} onSolicitantesChanged={setUsuarios} />}
+          {view === "administradores" && isMaster && <Administradores admins={admins} secret={secret} onAdminsChanged={setAdmins} />}
+        </main>
+        {auth.isAdmin && view !== "chamados" && allowed.has("chamados") && (
+          <ChamadosDock state={state} setState={setState} abertoId={chamadoAbertoId} onAbrirChange={setChamadoAbertoId} secret={secret} podeResponderChamados={podeResponderChamados} responderSoProprios={responderSoProprios} meuNome={auth.nome} fotosSolicitantes={fotosSolicitantes} />
+        )}
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);

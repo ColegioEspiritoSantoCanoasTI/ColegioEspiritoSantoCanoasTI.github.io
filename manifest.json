@@ -1,0 +1,23 @@
+{
+  "name": "Inventário de TI — Escola Espírito Santo",
+  "short_name": "Inventário TI",
+  "description": "App de gerenciamento de inventário de equipamentos de TI",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#F7F5EF",
+  "theme_color": "#16233D",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
