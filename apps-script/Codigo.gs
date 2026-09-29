@@ -214,6 +214,41 @@ function authenticateSolicitante(nome, senha) {
   return s;
 }
 
+// ---------- Proteção contra força bruta no login ----------
+// Antes, dava pra tentar senha atrás de senha sem limite nenhum — com
+// senha de admin curta (ex: só dígitos), um script quebra isso em horas.
+// Guarda tentativas erradas no CacheService (compartilhado entre todas as
+// execuções do script, expira sozinho) por nome tentado — adminNome e
+// userNome chegam iguais no login unificado, então um mesmo balde cobre
+// tentativa de admin ou de solicitante com aquele nome. Restauração de
+// sessão (só manda o secret salvo, sem nome nenhum) nunca passa por aqui,
+// então nunca trava sozinha por causa disso.
+const LOGIN_MAX_TENTATIVAS = 5;
+const LOGIN_BLOQUEIO_SEGUNDOS = 15 * 60;
+
+function loginCacheChave_(identificador) {
+  return 'login_tentativas_' + String(identificador || '').trim().toLowerCase();
+}
+
+function loginBloqueado_(identificador) {
+  if (!identificador) return false;
+  const valor = Number(CacheService.getScriptCache().get(loginCacheChave_(identificador)) || 0);
+  return valor >= LOGIN_MAX_TENTATIVAS;
+}
+
+function loginRegistrarFalha_(identificador) {
+  if (!identificador) return;
+  const cache = CacheService.getScriptCache();
+  const chave = loginCacheChave_(identificador);
+  const atual = Number(cache.get(chave) || 0);
+  cache.put(chave, String(atual + 1), LOGIN_BLOQUEIO_SEGUNDOS);
+}
+
+function loginLimparTentativas_(identificador) {
+  if (!identificador) return;
+  CacheService.getScriptCache().remove(loginCacheChave_(identificador));
+}
+
 // ---------- Cadastro público de solicitante ----------
 //
 // Antes, só um admin podia criar acesso de solicitante (em Usuários). Agora
@@ -460,10 +495,22 @@ function buscarChamadoPorId_(chamadoId) {
   }
 }
 
+// O Google Sheets recusa gravar mais de 50.000 caracteres numa única
+// célula — e o chamado inteiro (mensagens + fotos em base64) vira UMA
+// célula só aqui. Sem essa checagem, uma foto grande demais fazia
+// setValues/appendRow lançar uma exceção sem tratamento nenhum, que subia
+// até derrubar a resposta inteira do backend (o app "travava" ao abrir ou
+// responder um chamado com foto). Agora barra antes de tentar gravar, com
+// uma margem de segurança abaixo do limite real.
+const LIMITE_CARACTERES_CELULA = 45000;
+
 function salvarChamado_(chamado) {
   const sh = getOrCreateSheet('Chamados', ['id', 'dados']);
   const linha = encontrarLinhaChamado_(sh, chamado.id);
   const json = JSON.stringify(chamado);
+  if (json.length > LIMITE_CARACTERES_CELULA) {
+    throw new Error('CHAMADO_MUITO_GRANDE');
+  }
   if (linha === -1) {
     sh.appendRow([chamado.id, json]);
   } else {
@@ -679,6 +726,21 @@ function doGet(e) {
   const userNome = p.userNome || '';
   const userSenha = p.userSenha || '';
 
+  // Nome que a pessoa digitou de verdade (adminNome e userNome chegam
+  // iguais no login unificado) — usado só pra travar tentativas erradas
+  // repetidas; nunca fica vazio numa tentativa de login real (só em
+  // restauração de sessão, que não passa por aqui).
+  const identificadorTentativa = (userNome || adminNome || '').trim();
+  if (identificadorTentativa && loginBloqueado_(identificadorTentativa)) {
+    payload = { ok: true, isAdmin: false, isUser: false, error: 'Muitas tentativas erradas. Aguarde alguns minutos e tente de novo.' };
+    if (callback) {
+      return ContentService
+        .createTextOutput(callback + '(' + JSON.stringify(payload) + ');')
+        .setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    return jsonOut(payload);
+  }
+
   const admins = secret ? getAdmins() : null;
   let admin = findAdminBySecret(secret, admins);
   // adminNome só vem preenchido no login de verdade (tela "Entrar como
@@ -693,6 +755,7 @@ function doGet(e) {
   }
 
   if (admin) {
+    if (identificadorTentativa) loginLimparTentativas_(identificadorTentativa);
     const isMaster = admin.permissoes === 'todas';
     const state = readState();
     // getSolicitantes() é lido pra qualquer admin autenticado (não só
@@ -739,6 +802,7 @@ function doGet(e) {
     };
   } else if (userNome) {
     const usuario = autenticarUsuarioLogin(userNome, userSenha);
+    if (usuario && identificadorTentativa) loginLimparTentativas_(identificadorTentativa);
     if (usuario && usuario.aprovado === false) {
       payload = { ok: true, isAdmin: false, isUser: false, error: 'Seu cadastro ainda está aguardando aprovação de um administrador.' };
     } else if (usuario && usuario.tipo === 'autorizado') {
@@ -790,6 +854,7 @@ function doGet(e) {
         state: { areas: state.areas || [], categorias: state.categorias || [], chamados: meusChamados }
       };
     } else {
+      if (identificadorTentativa) loginRegistrarFalha_(identificadorTentativa);
       payload = { ok: true, isAdmin: false, isUser: false, error: 'Nome ou senha incorretos.' };
     }
   } else {
@@ -912,7 +977,14 @@ function doPostComTrava(e) {
       // admin a só responder os próprios chamados (responderSoProprios).
       body.chamado.abertoPorAdmin = admin.nome;
     }
-    salvarChamado_(body.chamado);
+    try {
+      salvarChamado_(body.chamado);
+    } catch (err) {
+      if (err.message === 'CHAMADO_MUITO_GRANDE') {
+        return jsonOut({ ok: false, error: 'A foto é grande demais para salvar. Tire a foto de novo com menos detalhe ou escolha outra.' });
+      }
+      throw err;
+    }
     notificarNovoChamado(body.chamado);
     sincronizarChamadoNoFirestore_(body.chamado);
     return jsonOut({ ok: true });
@@ -943,7 +1015,14 @@ function doPostComTrava(e) {
     // todo mundo, sem dar pra saber QUAL admin respondeu.
     mensagem.nome = adminPodeResponderChamados ? admin.nome : solicitante.nome;
     chamado.mensagens.push(mensagem);
-    salvarChamado_(chamado);
+    try {
+      salvarChamado_(chamado);
+    } catch (err) {
+      if (err.message === 'CHAMADO_MUITO_GRANDE') {
+        return jsonOut({ ok: false, error: 'A foto é grande demais para salvar. Tire a foto de novo com menos detalhe ou escolha outra.' });
+      }
+      throw err;
+    }
     sincronizarChamadoNoFirestore_(chamado);
     return jsonOut({ ok: true });
   }
@@ -970,7 +1049,14 @@ function doPostComTrava(e) {
       return jsonOut({ ok: false, error: 'Você só pode mudar o status dos chamados que você mesma abriu' });
     }
     chamado.status = body.status;
-    salvarChamado_(chamado);
+    try {
+      salvarChamado_(chamado);
+    } catch (err) {
+      if (err.message === 'CHAMADO_MUITO_GRANDE') {
+        return jsonOut({ ok: false, error: 'Não foi possível salvar: esse chamado ficou grande demais (provavelmente por causa de uma foto antiga). Avise o suporte.' });
+      }
+      throw err;
+    }
     sincronizarChamadoNoFirestore_(chamado);
     return jsonOut({ ok: true });
   }

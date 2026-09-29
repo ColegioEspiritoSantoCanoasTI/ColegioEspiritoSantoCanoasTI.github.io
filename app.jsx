@@ -796,6 +796,30 @@ function resizeImageParaBase64(file, maxDim, qualidade) {
   });
 }
 
+// Foto de chamado precisa caber, em base64, dentro do limite de uma célula
+// do Google Sheets no backend (ver LIMITE_CARACTERES_CELULA no Codigo.gs) —
+// uma foto de celular comprimida só uma vez (800px/qualidade 0.6) ainda
+// estoura esse limite na maioria das vezes. Tenta combinações cada vez
+// mais leves até caber; se nem a mais leve couber, devolve ela mesmo assim
+// — o backend recusa com uma mensagem clara em vez de travar.
+async function resizeImageParaBase64Chamado(file) {
+  const LIMITE_CARACTERES = 44000; // pequena margem abaixo do limite real do backend (45000)
+  const tentativas = [
+    [800, 0.6],
+    [800, 0.4],
+    [600, 0.4],
+    [600, 0.25],
+    [450, 0.25],
+    [350, 0.2],
+  ];
+  let resultado = null;
+  for (const [maxDim, qualidade] of tentativas) {
+    resultado = await resizeImageParaBase64(file, maxDim, qualidade);
+    if (resultado.length <= LIMITE_CARACTERES) return resultado;
+  }
+  return resultado;
+}
+
 function nextPatrimonio(inventario, prefixo) {
   let max = 0;
   inventario.forEach((r) => {
@@ -3981,7 +4005,7 @@ function Chamados({ state, setState, unidadeAtiva, secret, podeAbrirChamados = t
     if (!file) return;
     setFotoBusyAdmin(true);
     try {
-      const dataUrl = await resizeImageParaBase64(file, 800, 0.6);
+      const dataUrl = await resizeImageParaBase64Chamado(file);
       setForm((prev) => ({ ...prev, foto: dataUrl }));
     } catch (err) {}
     setFotoBusyAdmin(false);
@@ -4824,7 +4848,7 @@ function ChamadosSolicitante({ state, setState, userAuth, onLogout, onFotoChange
     if (!file) return;
     setFotoBusy(true);
     try {
-      const dataUrl = await resizeImageParaBase64(file, 800, 0.6);
+      const dataUrl = await resizeImageParaBase64Chamado(file);
       setForm((prev) => ({ ...prev, foto: dataUrl }));
     } catch (err) {}
     setFotoBusy(false);
