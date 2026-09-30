@@ -69,12 +69,40 @@ function findAdminBySecret(secret, adminsList) {
   return null;
 }
 
+// ---------- Gravação segura de abas inteiras ----------
+
+// Antes, saveAdmins/saveSolicitantes APAGAVAM a aba primeiro e só depois
+// gravavam a lista nova. Se a gravação falhasse no meio — o caso real era
+// uma célula passando do limite de 50.000 caracteres do Sheets, por
+// exemplo uma "foto de perfil" gigante mandada por fora do app —, a
+// exceção interrompia o script com a aba JÁ vazia: todas as contas sumiam
+// (reproduzido em teste). Agora: (1) confere o tamanho de todas as células
+// antes de encostar na planilha — se alguma passar, nada é alterado; (2)
+// grava a lista nova POR CIMA das linhas atuais; (3) só então limpa as
+// linhas que sobraram embaixo (quando a lista nova é menor). Em nenhum
+// momento a aba fica vazia.
+const LIMITE_CARACTERES_CELULA_SEGURO = 45000;
+
+function substituirLinhasComSeguranca_(sh, rows, numColunas) {
+  rows.forEach(function (row) {
+    row.forEach(function (valor) {
+      if (String(valor === undefined || valor === null ? '' : valor).length > LIMITE_CARACTERES_CELULA_SEGURO) {
+        throw new Error('CELULA_MUITO_GRANDE');
+      }
+    });
+  });
+  const lastRowAntes = sh.getLastRow();
+  if (rows.length > 0) {
+    sh.getRange(2, 1, rows.length, numColunas).setValues(rows);
+  }
+  const primeiraSobrando = rows.length + 2;
+  if (lastRowAntes >= primeiraSobrando) {
+    sh.getRange(primeiraSobrando, 1, lastRowAntes - primeiraSobrando + 1, numColunas).clearContent();
+  }
+}
+
 function saveAdmins(list) {
   const sh = getOrCreateSheet('Admins', ['nome', 'senha', 'permissoes', 'editar', 'podeAbrirChamados', 'podeResponderChamados', 'responderSoProprios']);
-  const lastRow = sh.getLastRow();
-  if (lastRow >= 2) {
-    sh.getRange(2, 1, lastRow - 1, 7).clearContent();
-  }
   // Se quem chamou (frontend atual, sempre manda os dois campos; uma
   // chamada externa/antiga pode não mandar) não informar
   // podeAbrirChamados/podeResponderChamados, herda de "editar" — mesma
@@ -85,9 +113,7 @@ function saveAdmins(list) {
     const responder = a.podeResponderChamados === undefined ? !!a.editar : !!a.podeResponderChamados;
     return [a.nome, a.senha, a.permissoes, !!a.editar, abrir, responder, !!a.responderSoProprios];
   });
-  if (rows.length > 0) {
-    sh.getRange(2, 1, rows.length, 7).setValues(rows);
-  }
+  substituirLinhasComSeguranca_(sh, rows, 7);
 }
 
 // ---------- Solicitantes (quem abre chamados) ----------
@@ -152,10 +178,6 @@ function findSolicitante(identificador) {
 
 function saveSolicitantes(list) {
   const sh = getOrCreateSheet('Solicitantes', ['nome', 'senha', 'tipo', 'foto', 'email', 'aprovado', 'autorizadoAbreChamados']);
-  const lastRow = sh.getLastRow();
-  if (lastRow >= 2) {
-    sh.getRange(2, 1, lastRow - 1, 7).clearContent();
-  }
   const rows = (list || []).map(function (s) {
     return [
       s.nome,
@@ -167,23 +189,38 @@ function saveSolicitantes(list) {
       !!s.autorizadoAbreChamados,
     ];
   });
-  if (rows.length > 0) {
-    sh.getRange(2, 1, rows.length, 7).setValues(rows);
-  }
+  substituirLinhasComSeguranca_(sh, rows, 7);
 }
 
-// Atualiza só a foto de UM solicitante (o autenticado), preservando o resto
-// da linha dele. Separado de saveSolicitantes (que é do master, pra lista
-// inteira) porque aqui quem chama só pode mudar a própria foto — nunca a de
-// outra pessoa.
+// Foto de perfil vem do navegador já reduzida (240px, JPEG — uns 10-20 mil
+// caracteres em base64). O limite aqui é só pra barrar quem manda direto
+// pro backend, sem passar pelo app.
+const LIMITE_FOTO_PERFIL = 40000;
+
+// Atualiza só a foto de UM solicitante (o autenticado). Antes regravava a
+// aba Solicitantes inteira (via saveSolicitantes) só pra trocar uma célula
+// — e sem limite de tamanho, uma foto gigante derrubava a gravação com a
+// aba já apagada, sumindo com todas as contas. Agora valida a foto e
+// escreve só a célula da coluna "foto" da linha dessa pessoa; o resto da
+// planilha nem é tocado. Quem chama só pode mudar a própria foto — nunca a
+// de outra pessoa.
 function atualizarFotoSolicitante(nome, novaFoto) {
-  const lista = getSolicitantes();
+  const foto = String(novaFoto || '');
+  if (foto && (foto.indexOf('data:image/') !== 0 || foto.length > LIMITE_FOTO_PERFIL)) {
+    return { ok: false, error: 'Foto inválida ou grande demais.' };
+  }
+  const sh = getOrCreateSheet('Solicitantes', ['nome', 'senha', 'tipo', 'foto', 'email', 'aprovado', 'autorizadoAbreChamados']);
+  const lastRow = sh.getLastRow();
+  if (lastRow < 2) return { ok: false, error: 'Usuário não encontrado.' };
+  const nomes = sh.getRange(2, 1, lastRow - 1, 1).getValues();
   const alvo = String(nome || '').trim().toLowerCase();
-  const atualizada = lista.map(function (s) {
-    if (s.nome.trim().toLowerCase() !== alvo) return s;
-    return { nome: s.nome, senha: s.senha, tipo: s.tipo, foto: novaFoto || '', email: s.email, aprovado: s.aprovado, autorizadoAbreChamados: s.autorizadoAbreChamados };
-  });
-  saveSolicitantes(atualizada);
+  for (let i = 0; i < nomes.length; i++) {
+    if (String(nomes[i][0] || '').trim().toLowerCase() === alvo) {
+      sh.getRange(i + 2, 4).setValue(foto); // +2: pula o cabeçalho, base 1; coluna 4 = foto
+      return { ok: true };
+    }
+  }
+  return { ok: false, error: 'Usuário não encontrado.' };
 }
 
 // Autentica só nome+senha, sem olhar o tipo — usado no LOGIN (ramo userNome
@@ -301,6 +338,11 @@ function processarCadastroSolicitante_(nome, email, senha) {
   if (!nome || !email || !senha) {
     return { ok: false, error: 'Preencha nome, email e senha.' };
   }
+  // Rota pública, sem login: sem limite, dava pra encher a planilha de
+  // cadastros gigantes.
+  if (nome.length > 100 || email.length > 200 || senha.length > 200) {
+    return { ok: false, error: 'Nome, email ou senha longos demais.' };
+  }
   if (!validarEmail_(email)) {
     return { ok: false, error: 'Informe um email válido.' };
   }
@@ -313,8 +355,10 @@ function processarCadastroSolicitante_(nome, email, senha) {
   if (jaExisteNome) {
     return { ok: false, error: 'Já existe um cadastro com esse nome.' };
   }
-  const novo = { nome: nome, senha: senha, tipo: 'solicitante', foto: '', email: email, aprovado: false };
-  saveSolicitantes(existentes.concat([novo]));
+  // Acrescenta só a linha nova (mesma ordem de colunas de saveSolicitantes)
+  // em vez de regravar a aba inteira a cada cadastro público.
+  getOrCreateSheet('Solicitantes', ['nome', 'senha', 'tipo', 'foto', 'email', 'aprovado', 'autorizadoAbreChamados'])
+    .appendRow([nome, senha, 'solicitante', '', email, false, false]);
   return { ok: true };
 }
 
@@ -1070,13 +1114,25 @@ function doPostComTrava(e) {
     return jsonOut({ ok: true });
   }
 
+  // CELULA_MUITO_GRANDE vem de substituirLinhasComSeguranca_ — nesse caso a
+  // planilha não foi alterada em nada.
   if (isMaster && body.action === 'salvarAdmins') {
-    saveAdmins(body.admins || []);
+    try {
+      saveAdmins(body.admins || []);
+    } catch (err) {
+      if (err.message === 'CELULA_MUITO_GRANDE') return jsonOut({ ok: false, error: 'Algum campo está grande demais. Nada foi alterado.' });
+      throw err;
+    }
     return jsonOut({ ok: true });
   }
 
   if (isMaster && body.action === 'salvarSolicitantes') {
-    saveSolicitantes(body.solicitantes || []);
+    try {
+      saveSolicitantes(body.solicitantes || []);
+    } catch (err) {
+      if (err.message === 'CELULA_MUITO_GRANDE') return jsonOut({ ok: false, error: 'Algum campo está grande demais. Nada foi alterado.' });
+      throw err;
+    }
     return jsonOut({ ok: true });
   }
 
@@ -1090,8 +1146,7 @@ function doPostComTrava(e) {
     if (!usuario) {
       return jsonOut({ ok: false, error: 'Não autenticado' });
     }
-    atualizarFotoSolicitante(usuario.nome, body.foto);
-    return jsonOut({ ok: true });
+    return jsonOut(atualizarFotoSolicitante(usuario.nome, body.foto));
   }
 
   // Antes: novoChamado e novaMensagem não checavam login nenhum — qualquer
