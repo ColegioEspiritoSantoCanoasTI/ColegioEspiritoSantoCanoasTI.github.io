@@ -36,11 +36,13 @@ function getAdmins() {
   const sh = getOrCreateSheet('Admins', ['nome', 'senha', 'permissoes', 'editar', 'podeAbrirChamados', 'podeResponderChamados', 'responderSoProprios']);
   const data = sh.getDataRange().getValues();
   const rows = data.slice(1).filter(function (r) { return r[0] || r[1]; });
-  if (rows.length === 0) {
-    sh.appendRow(['Administrador', 'mude-esta-senha-123', 'todas', true, true, true, false]);
-    return [{ nome: 'Administrador', senha: 'mude-esta-senha-123', permissoes: 'todas', editar: true, podeAbrirChamados: true, podeResponderChamados: true, responderSoProprios: false }];
-  }
-  return rows.map(function (r) {
+  // Antes: com a aba vazia, recriava sozinho um admin master com a senha
+  // padrão 'mude-esta-senha-123' — que está no código público do GitHub, ou
+  // seja, qualquer um conseguiria entrar como master depois de um acidente
+  // na planilha. Agora aba vazia = ninguém entra como admin; o primeiro admin
+  // precisa ser digitado direto na planilha por quem tem acesso a ela.
+  // Linha sem senha também é ignorada, pra um secret vazio nunca bater.
+  return rows.filter(function (r) { return String(r[1] || '') !== ''; }).map(function (r) {
     const editar = r[3] === true;
     const abrirEmBranco = r[4] === '' || r[4] === undefined || r[4] === null;
     const responderEmBranco = r[5] === '' || r[5] === undefined || r[5] === null;
@@ -221,8 +223,8 @@ function authenticateSolicitante(nome, senha) {
 // execuções do script, expira sozinho) por nome tentado — adminNome e
 // userNome chegam iguais no login unificado, então um mesmo balde cobre
 // tentativa de admin ou de solicitante com aquele nome. Restauração de
-// sessão (só manda o secret salvo, sem nome nenhum) nunca passa por aqui,
-// então nunca trava sozinha por causa disso.
+// sessão (só manda o secret salvo, sem nome nenhum) não passa por este
+// balde — tem o seu próprio, geral (ver secretBloqueado_ logo abaixo).
 const LOGIN_MAX_TENTATIVAS = 5;
 const LOGIN_BLOQUEIO_SEGUNDOS = 15 * 60;
 
@@ -247,6 +249,31 @@ function loginRegistrarFalha_(identificador) {
 function loginLimparTentativas_(identificador) {
   if (!identificador) return;
   CacheService.getScriptCache().remove(loginCacheChave_(identificador));
+}
+
+// O balde por nome acima não cobria quem manda SÓ o secret, sem nome
+// nenhum (o formato da restauração de sessão, e de todo doPost de admin):
+// dava pra testar senha de admin atrás de senha sem limite, e qualquer
+// acerto já virava sessão de admin (findAdminBySecret aceita a senha de
+// qualquer admin). Aqui um contador geral de "secret sem nome errado", que
+// vale pra doGet e doPost juntos: passou do limite, nenhum secret sem nome
+// é aceito até expirar. Login normal (com nome) não conta aqui — quem só
+// errou a própria senha de solicitante não trava o login de admin de
+// ninguém. Efeito colateral aceito: um ataque ativo derruba a restauração
+// de sessão dos admins por até 15 min (basta entrar de novo com nome+senha,
+// que usa o balde por nome e não este).
+const SECRET_MAX_FALHAS = 20;
+const SECRET_CHAVE_CACHE = 'secret_sem_nome_falhas';
+
+function secretBloqueado_() {
+  const valor = Number(CacheService.getScriptCache().get(SECRET_CHAVE_CACHE) || 0);
+  return valor >= SECRET_MAX_FALHAS;
+}
+
+function secretRegistrarFalha_() {
+  const cache = CacheService.getScriptCache();
+  const atual = Number(cache.get(SECRET_CHAVE_CACHE) || 0);
+  cache.put(SECRET_CHAVE_CACHE, String(atual + 1), LOGIN_BLOQUEIO_SEGUNDOS);
 }
 
 // ---------- Cadastro público de solicitante ----------
@@ -595,6 +622,71 @@ function excluirChamadoNoFirestore_(chamadoId) {
   }
 }
 
+// ---------- Token do Firebase pro admin (leitura ao vivo dos chamados) ----------
+
+// Antes, a tela do admin entrava no Firebase com login ANÔNIMO — e como
+// qualquer pessoa na internet consegue fazer esse mesmo login anônimo (a
+// config do Firebase está no index.html público), as regras do Firestore
+// não tinham como diferenciar um admin de um estranho: quem abrisse a
+// coleção "chamados" lia tudo. Agora o backend, depois de conferir a senha
+// do admin, gera um "custom token" do Firebase assinado com a chave da
+// conta de serviço (a mesma de getFirestore_), com a marca chamados=true.
+// O frontend entra no Firebase com esse token (signInWithCustomToken) e as
+// regras do Firestore só liberam leitura pra quem tem essa marca:
+//
+//   match /chamados/{id} {
+//     allow read: if request.auth != null && request.auth.token.chamados == true;
+//     allow write: if false;
+//   }
+//
+// Só sai token pra admin que enxerga Chamados (master ou com "chamados"
+// nas permissões) — os outros continuam sem leitura ao vivo, como já era
+// na prática. O token vale 1h só pra fazer o login; depois disso o próprio
+// SDK do Firebase mantém a sessão enquanto a aba estiver aberta. Se faltar
+// alguma propriedade do script ou a assinatura falhar, devolve '' e o app
+// segue sem atualização ao vivo (lendo pelo doGet, como sempre).
+function adminVeChamados_(admin) {
+  if (admin.permissoes === 'todas') return true;
+  return String(admin.permissoes || '').split(',').map(function (s) { return s.trim().toLowerCase(); }).indexOf('chamados') !== -1;
+}
+
+function base64UrlSemPadding_(valor) {
+  return Utilities.base64EncodeWebSafe(valor).replace(/=+$/, '');
+}
+
+function gerarTokenFirebaseAdmin_(admin) {
+  try {
+    if (!adminVeChamados_(admin)) return '';
+    const props = PropertiesService.getScriptProperties();
+    const email = props.getProperty('FIREBASE_CLIENT_EMAIL');
+    const chavePrivada = props.getProperty('FIREBASE_PRIVATE_KEY');
+    if (!email || !chavePrivada) return '';
+    // uid estável por admin, sem expor o nome (o uid aparece no painel
+    // Authentication do Firebase) e sempre dentro do limite de 128 chars.
+    const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, 'admin:' + admin.nome.trim().toLowerCase(), Utilities.Charset.UTF_8);
+    const uid = 'admin-' + digest.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('').slice(0, 32);
+    const agora = Math.floor(Date.now() / 1000);
+    const header = { alg: 'RS256', typ: 'JWT' };
+    const payload = {
+      iss: email,
+      sub: email,
+      aud: 'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit',
+      iat: agora,
+      exp: agora + 3600,
+      uid: uid,
+      claims: { chamados: true },
+    };
+    const entrada = base64UrlSemPadding_(Utilities.newBlob(JSON.stringify(header)).getBytes()) + '.' +
+      base64UrlSemPadding_(Utilities.newBlob(JSON.stringify(payload)).getBytes());
+    // Mesmo tratamento do "\n" literal que getFirestore_ faz na chave.
+    const assinatura = Utilities.computeRsaSha256Signature(entrada, chavePrivada.replace(/\\n/g, '\n'));
+    return entrada + '.' + base64UrlSemPadding_(assinatura);
+  } catch (err) {
+    Logger.log('Falha ao gerar token do Firebase pro admin: ' + err);
+    return '';
+  }
+}
+
 // Execução manual (uma vez só, pelo editor do Apps Script) pra copiar os
 // chamados que já existem na planilha pro Firestore, na hora de ligar a
 // sincronização — sem isso, só chamados novos apareceriam lá.
@@ -741,8 +833,22 @@ function doGet(e) {
     return jsonOut(payload);
   }
 
+  // Secret sem nome = restauração de sessão (ou alguém testando senhas de
+  // admin às cegas) — ver secretBloqueado_.
+  const secretSemNome = !!secret && !adminNome;
+  if (secretSemNome && secretBloqueado_()) {
+    payload = { ok: true, isAdmin: false, isUser: false, error: 'Muitas tentativas erradas. Aguarde alguns minutos e tente de novo.' };
+    if (callback) {
+      return ContentService
+        .createTextOutput(callback + '(' + JSON.stringify(payload) + ');')
+        .setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    return jsonOut(payload);
+  }
+
   const admins = secret ? getAdmins() : null;
   let admin = findAdminBySecret(secret, admins);
+  if (secretSemNome && !admin) secretRegistrarFalha_();
   // adminNome só vem preenchido no login de verdade (tela "Entrar como
   // administrador"), pra exigir nome de usuário + senha, os dois batendo com
   // o MESMO administrador — não só a senha sozinha, que antes bastava pra
@@ -798,7 +904,8 @@ function doGet(e) {
       }) : [],
       solicitantes: isMaster ? solicitantesList : [],
       fotosSolicitantes: fotosSolicitantes,
-      historico: getHistoricoMensal()
+      historico: getHistoricoMensal(),
+      firebaseToken: gerarTokenFirebaseAdmin_(admin)
     };
   } else if (userNome) {
     const usuario = autenticarUsuarioLogin(userNome, userSenha);
@@ -904,7 +1011,14 @@ function doPost(e) {
 
 function doPostComTrava(e) {
   const body = JSON.parse(e.postData.contents);
-  const admin = findAdminBySecret(body.secret);
+  // doPost de admin sempre manda só o secret, sem nome — mesmo contador
+  // geral do doGet (ver secretBloqueado_). Bloqueado, o secret é ignorado:
+  // a ação segue como se fosse de alguém não logado como admin.
+  let admin = null;
+  if (body.secret && !secretBloqueado_()) {
+    admin = findAdminBySecret(body.secret);
+    if (!admin) secretRegistrarFalha_();
+  }
   const isAdmin = !!admin;
   const isMaster = admin && admin.permissoes === 'todas';
   // Admin com acesso restrito e "editar" desmarcado só pode visualizar — não
@@ -968,25 +1082,64 @@ function doPostComTrava(e) {
     if (!adminPodeAbrirChamados && !solicitante) {
       return jsonOut({ ok: false, error: 'Não autenticado' });
     }
+    // Antes: o chamado era gravado do jeito que o cliente mandou — id,
+    // status, mensagens e tudo. Como salvarChamado_ sobrescreve a linha se o
+    // id já existe, qualquer solicitante logado conseguia substituir o
+    // chamado de OUTRA pessoa mandando o mesmo id, abrir chamado já
+    // "Resolvido" ou colocar mensagem com autor 'ti'. Agora o servidor monta
+    // o chamado e só aproveita do cliente os campos que a pessoa preenche.
+    // O id continua vindo do cliente (o POST é no-cors, o frontend nunca lê
+    // a resposta e já usa esse id na tela pra mandar as próximas mensagens),
+    // mas só se tiver o formato do uid("CH") e ainda não existir.
+    const recebido = body.chamado || {};
+    const idRecebido = String(recebido.id || '');
+    if (!/^CH-[A-Z0-9]{1,20}$/.test(idRecebido)) {
+      return jsonOut({ ok: false, error: 'Chamado inválido' });
+    }
+    if (buscarChamadoPorId_(idRecebido)) {
+      return jsonOut({ ok: false, error: 'Chamado já existe' });
+    }
+    const textoCampo_ = function (v, max) { return String(v || '').slice(0, max); };
+    const primeiraMsg = (Array.isArray(recebido.mensagens) && recebido.mensagens[0]) || {};
+    const fotoRecebida = String(recebido.foto || '');
+    const agora = new Date().toISOString();
+    const chamado = {
+      id: idRecebido,
+      assunto: textoCampo_(recebido.assunto, 60),
+      tipo: textoCampo_(recebido.tipo, 100),
+      unidade: textoCampo_(recebido.unidade, 100),
+      sala: textoCampo_(recebido.sala, 200),
+      categoria: textoCampo_(recebido.categoria, 200),
+      foto: fotoRecebida.indexOf('data:image/') === 0 ? fotoRecebida : '',
+      status: 'Aberto',
+      criadoEm: agora,
+      mensagens: [{
+        // A primeira mensagem é sempre a descrição do problema, inclusive
+        // quando um admin abre em nome de alguém — mesmo formato de antes.
+        autor: 'solicitante',
+        texto: textoCampo_(primeiraMsg.texto, 5000),
+        data: agora,
+      }],
+    };
     if (solicitante) {
-      body.chamado.criadoPor = solicitante.nome;
-      body.chamado.solicitante = solicitante.nome;
+      chamado.criadoPor = solicitante.nome;
+      chamado.solicitante = solicitante.nome;
     } else if (isAdmin) {
       // Marca quem abriu quando é um admin abrindo direto (ex: recepção
       // atendendo alguém pessoalmente) — é o que permite restringir esse
       // admin a só responder os próprios chamados (responderSoProprios).
-      body.chamado.abertoPorAdmin = admin.nome;
+      chamado.abertoPorAdmin = admin.nome;
     }
     try {
-      salvarChamado_(body.chamado);
+      salvarChamado_(chamado);
     } catch (err) {
       if (err.message === 'CHAMADO_MUITO_GRANDE') {
         return jsonOut({ ok: false, error: 'A foto é grande demais para salvar. Tire a foto de novo com menos detalhe ou escolha outra.' });
       }
       throw err;
     }
-    notificarNovoChamado(body.chamado);
-    sincronizarChamadoNoFirestore_(body.chamado);
+    notificarNovoChamado(chamado);
+    sincronizarChamadoNoFirestore_(chamado);
     return jsonOut({ ok: true });
   }
 
@@ -1008,12 +1161,19 @@ function doPostComTrava(e) {
     if (isAdmin && !podeMexerNesseChamado_(chamado)) {
       return jsonOut({ ok: false, error: 'Você só pode responder aos chamados que você mesma abriu' });
     }
-    const mensagem = body.mensagem || {};
-    mensagem.autor = adminPodeResponderChamados ? 'ti' : 'solicitante';
-    // Nome de quem respondeu de verdade (nunca o que o cliente mandou) —
-    // antes toda resposta de admin aparecia só como "Administrador" pra
-    // todo mundo, sem dar pra saber QUAL admin respondeu.
-    mensagem.nome = adminPodeResponderChamados ? admin.nome : solicitante.nome;
+    // Monta a mensagem no servidor em vez de gravar o objeto do cliente com
+    // só autor/nome trocados — senão dava pra enfiar qualquer campo extra
+    // (ou data falsa) dentro do chamado.
+    const recebida = body.mensagem || {};
+    const mensagem = {
+      autor: adminPodeResponderChamados ? 'ti' : 'solicitante',
+      // Nome de quem respondeu de verdade (nunca o que o cliente mandou) —
+      // antes toda resposta de admin aparecia só como "Administrador" pra
+      // todo mundo, sem dar pra saber QUAL admin respondeu.
+      nome: adminPodeResponderChamados ? admin.nome : solicitante.nome,
+      texto: String(recebida.texto || '').slice(0, 5000),
+      data: new Date().toISOString(),
+    };
     chamado.mensagens.push(mensagem);
     try {
       salvarChamado_(chamado);
@@ -1040,6 +1200,11 @@ function doPostComTrava(e) {
   if (body.action === 'mudarStatusChamado') {
     if (!adminPodeResponderChamados) {
       return jsonOut({ ok: false, error: 'Não autenticado' });
+    }
+    // Mesma lista de CHAMADO_STATUS_OPTIONS no frontend — qualquer outro
+    // valor bagunçaria o painel e o histórico mensal (contarPor).
+    if (['Aberto', 'Em andamento', 'Resolvido'].indexOf(body.status) === -1) {
+      return jsonOut({ ok: false, error: 'Status inválido' });
     }
     const chamado = buscarChamadoPorId_(body.chamadoId);
     if (!chamado) {

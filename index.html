@@ -426,32 +426,60 @@ async function backendPost(action, payload) {
 // index.html) são opcionais de propósito — se não estiverem presentes (app
 // ainda não configurado, ou CDN bloqueado), a função simplesmente não faz
 // nada e o app continua funcionando do jeito que já funcionava antes.
+//
+// Antes entrava no Firebase com login anônimo — que qualquer pessoa consegue
+// fazer igual, então as regras do Firestore não tinham como separar admin
+// de estranho. Agora entra com o token que o backend só entrega pra admin
+// logado (firebaseToken, ver gerarTokenFirebaseAdmin_ no Codigo.gs), e as
+// regras só liberam leitura pra quem entrou com ele. A sessão do Firebase
+// fica só na memória da aba (Persistence.NONE): fechou a aba, acabou — a
+// próxima vez que abrir, o doGet de restauração de sessão manda um token
+// novo, que só sai se a senha do admin ainda for válida.
 let firebaseAppPromise = null;
-function getFirebaseApp_() {
-  if (typeof window === "undefined" || !window.firebase || !window.FIREBASE_CONFIG) return null;
-  if (!firebaseAppPromise) {
+let firebaseTokenEmUso = "";
+function getFirebaseApp_(token) {
+  if (typeof window === "undefined" || !window.firebase || !window.FIREBASE_CONFIG || !token) return null;
+  if (!firebaseAppPromise || firebaseTokenEmUso !== token) {
+    firebaseTokenEmUso = token;
     firebaseAppPromise = (async () => {
       const app = window.firebase.apps && window.firebase.apps.length ? window.firebase.apps[0] : window.firebase.initializeApp(window.FIREBASE_CONFIG);
-      await window.firebase.auth().signInAnonymously();
+      const fbAuth = window.firebase.auth();
+      await fbAuth.setPersistence(window.firebase.auth.Auth.Persistence.NONE);
+      await fbAuth.signInWithCustomToken(token);
       return app;
     })().catch(err => {
       firebaseAppPromise = null;
+      firebaseTokenEmUso = "";
       throw err;
     });
   }
   return firebaseAppPromise;
 }
 
+// Chamado no logout do admin — sem isso a aba continuava logada no Firebase
+// (e recebendo chamados ao vivo) até ser fechada.
+function sairDoFirebase_() {
+  firebaseAppPromise = null;
+  firebaseTokenEmUso = "";
+  try {
+    if (window.firebase && window.firebase.apps && window.firebase.apps.length) {
+      window.firebase.auth().signOut().catch(() => {});
+    }
+  } catch (e) {}
+}
+
 // Retorna uma função pra cancelar a assinatura (chamar no cleanup do
 // useEffect / no logout). onChange recebe a lista inteira de chamados toda
 // vez que algo muda no Firestore (documento novo, editado ou removido).
-function assinarChamadosAoVivo(onChange) {
+function assinarChamadosAoVivo(token, onChange) {
   let cancelado = false;
   let unsubscribeSnapshot = null;
-  const appPromise = getFirebaseApp_();
+  const appPromise = getFirebaseApp_(token);
   if (!appPromise) {
-    // Firebase não configurado (sem window.firebase e/ou window.FIREBASE_CONFIG):
-    // não tenta nada, app segue no jeito de sempre (leitura via doGet).
+    // Firebase não configurado (sem window.firebase e/ou window.FIREBASE_CONFIG)
+    // ou backend não mandou token (admin sem acesso a Chamados, ou chave do
+    // Firebase não configurada no Apps Script): não tenta nada, app segue no
+    // jeito de sempre (leitura via doGet).
     return () => {};
   }
   appPromise.then(() => {
@@ -13313,7 +13341,8 @@ function App() {
       editar: !!data.editar,
       podeAbrirChamados: data.podeAbrirChamados,
       podeResponderChamados: data.podeResponderChamados,
-      responderSoProprios: data.responderSoProprios
+      responderSoProprios: data.responderSoProprios,
+      firebaseToken: data.firebaseToken || ""
     });
     setAdmins(data.admins || []);
     setUsuarios(data.solicitantes || []);
@@ -13464,16 +13493,17 @@ function App() {
   // recarregar a página. Se o Firebase não estiver configurado, essa
   // assinatura simplesmente não faz nada (ver assinarChamadosAoVivo).
   useEffect(() => {
-    if (!auth || !auth.isAdmin) return;
-    const cancelar = assinarChamadosAoVivo(chamadosAoVivo => {
+    if (!auth || !auth.isAdmin || !auth.firebaseToken) return;
+    const cancelar = assinarChamadosAoVivo(auth.firebaseToken, chamadosAoVivo => {
       setState(prev => prev ? {
         ...prev,
         chamados: chamadosAoVivo
       } : prev);
     });
     return cancelar;
-  }, [auth && auth.isAdmin]);
+  }, [auth && auth.isAdmin, auth && auth.firebaseToken]);
   function logout() {
+    sairDoFirebase_();
     try {
       localStorage.removeItem(SECRET_STORAGE_KEY);
     } catch (e) {}
