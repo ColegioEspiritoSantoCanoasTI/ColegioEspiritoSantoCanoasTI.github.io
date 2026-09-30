@@ -237,13 +237,6 @@ async function jsonpRequestComRetry(url) {
   }
 }
 
-// Consulta leve (só a versão do estado, sem baixar inventário/chamados) —
-// usada depois de cada autosave pra saber se a gravação foi aceita. Ver
-// VERSAO_ESTADO_PROP no Codigo.gs.
-async function backendGetVersaoEstado(secret) {
-  return jsonpRequestComRetry(BACKEND_URL + "?action=versaoEstado&secret=" + encodeURIComponent(secret));
-}
-
 // Chave pra comparar se o que o autosave grava (tudo menos chamados, que têm
 // ações próprias no backend) mudou desde a última gravação/carregamento.
 function chaveEstadoSemChamados_(state) {
@@ -296,26 +289,78 @@ async function backendCadastro(nome, email, senha) {
   return jsonpRequestComRetry(url);
 }
 
+// Restaura a sessão (token guardado no navegador, nunca a senha) — ver
+// criarSessao_ no Codigo.gs.
+async function backendGetSessao(sessao) {
+  return jsonpRequestComRetry(BACKEND_URL + "?sessao=" + encodeURIComponent(sessao));
+}
+
+// Códigos de erro que o backend devolve e o texto que a pessoa vê.
+const MENSAGENS_ERRO_BACKEND = {
+  SESSAO_INVALIDA: "Sua sessão expirou. Entre de novo.",
+  CONFLITO_VERSAO: "Outro administrador alterou o inventário depois que você abriu esta página. Recarregue para ver a versão atual.",
+  ESTADO_ILEGIVEL: "Não foi possível ler o inventário agora. Tente de novo em alguns segundos.",
+};
+
+// Evento que o App escuta pra voltar à tela de login quando o servidor
+// recusa a sessão (senha trocada, conta excluída, sessão vencida).
+const EVENTO_SESSAO_INVALIDA = "inventario-sessao-invalida";
+
+// Antes o POST ia em modo "no-cors": o navegador nunca conseguia ler a
+// resposta, então todo erro do servidor (foto grande demais, sem permissão,
+// sistema ocupado...) passava em silêncio e a tela mostrava "Salvo com
+// sucesso" mesmo quando nada tinha sido salvo. O Apps Script responde com
+// Access-Control-Allow-Origin: *, e com Content-Type text/plain o POST não
+// precisa de preflight — então dá pra ler a resposta normalmente. Aqui:
+// resposta com ok:true volta pra quem chamou; ok:false vira um Error com a
+// mensagem do servidor (e.amigavel = true, pra tela poder mostrar ela).
 async function backendPost(action, payload) {
   const tentar = () =>
     fetch(BACKEND_URL, {
       method: "POST",
-      mode: "no-cors",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({ action, ...(payload || {}) }),
     });
+  let resposta;
   try {
     try {
-      await tentar();
+      resposta = await tentar();
     } catch (e) {
       // Instabilidade passageira do backend: tenta uma vez mais antes de desistir.
       await new Promise((r) => setTimeout(r, 1000));
-      await tentar();
+      resposta = await tentar();
     }
-    return { ok: true };
   } catch (e) {
-    throw new Error("Falha ao enviar dados para o backend: " + ((e && e.message) || e));
+    throw erroAmigavel_("Sem conexão com o servidor. Verifique a internet e tente de novo.");
   }
+  let dados;
+  try {
+    dados = await resposta.json();
+  } catch (e) {
+    throw erroAmigavel_("O servidor teve um erro interno. Tente de novo; se continuar, avise o suporte de TI.");
+  }
+  if (dados && dados.ok) return dados;
+  const codigo = (dados && dados.error) || "";
+  if (codigo === "SESSAO_INVALIDA") {
+    try {
+      window.dispatchEvent(new Event(EVENTO_SESSAO_INVALIDA));
+    } catch (e) {}
+  }
+  const erro = erroAmigavel_(MENSAGENS_ERRO_BACKEND[codigo] || codigo || "O servidor recusou a operação.");
+  erro.codigo = codigo;
+  throw erro;
+}
+
+function erroAmigavel_(mensagem) {
+  const erro = new Error(mensagem);
+  erro.amigavel = true;
+  return erro;
+}
+
+// Mensagem pra mostrar na tela: a do servidor quando existe, senão o texto
+// genérico de quem chamou.
+function textoDoErro_(e, padrao) {
+  return e && e.amigavel ? e.message : padrao;
 }
 
 // ---------- Firebase / Firestore (leitura ao vivo dos chamados, só pro admin) ----------
@@ -3681,7 +3726,7 @@ function Relatorios({ state, historico }) {
 
 // ---------- Importar / Exportar ----------
 
-function Importar({ state, setState, unidadeAtiva, secret, podeEditar = true }) {
+function Importar({ state, setState, unidadeAtiva, sessao, podeEditar = true }) {
   const fileRef = useRef(null);
   const [status, setStatus] = useState(null); // {type: 'ok'|'error', msg}
   const [busy, setBusy] = useState(false);
@@ -3694,10 +3739,19 @@ function Importar({ state, setState, unidadeAtiva, secret, podeEditar = true }) 
   const nomeUnidade = (UNIDADES.find((u) => u.id === unidadeAtiva) || {}).nome || unidadeAtiva;
   const inventarioUnidade = useMemo(() => state.inventario.filter((r) => unidadeDe(r) === unidadeAtiva), [state.inventario, unidadeAtiva]);
 
-  function clearInventario() {
+  // O navegador não guarda mais a senha (só o token da sessão), então quem
+  // confere a senha digitada aqui é o servidor.
+  async function clearInventario() {
     if (!podeEditar) return;
-    if (clearSenha !== secret) {
-      setClearErro("Senha incorreta.");
+    setClearErro("");
+    try {
+      const res = await backendPost("conferirSenha", { sessao, senha: clearSenha });
+      if (!res.valida) {
+        setClearErro("Senha incorreta.");
+        return;
+      }
+    } catch (e) {
+      setClearErro(textoDoErro_(e, "Não foi possível conferir a senha. Tente novamente."));
       return;
     }
     setState((prev) => ({ ...prev, inventario: prev.inventario.filter((r) => unidadeDe(r) !== unidadeAtiva) }));
@@ -4037,7 +4091,7 @@ function novoChamadoForm(unidadeAtiva) {
   return { tipo: "Problema técnico", unidade: unidadeAtiva || "colegio", sala: "", categoria: "", texto: "", foto: "" };
 }
 
-function Chamados({ state, setState, unidadeAtiva, secret, podeAbrirChamados = true, podeResponderChamados = true, responderSoProprios = false, meuNome = "", fotosSolicitantes = {} }) {
+function Chamados({ state, setState, unidadeAtiva, sessao, podeAbrirChamados = true, podeResponderChamados = true, responderSoProprios = false, meuNome = "", fotosSolicitantes = {} }) {
   const [selectedId, setSelectedId] = useState(null);
   const [novoMode, setNovoMode] = useState(false);
   const [form, setForm] = useState(novoChamadoForm(unidadeAtiva));
@@ -4107,14 +4161,13 @@ function Chamados({ state, setState, unidadeAtiva, secret, podeAbrirChamados = t
     setBusy(true);
     setErro("");
     try {
-      const res = await backendPost("novoChamado", { chamado, secret });
-      if (!res.ok) throw new Error(res.error || "Erro ao abrir chamado");
+      await backendPost("novoChamado", { chamado, sessao });
       setState((prev) => ({ ...prev, chamados: comChamadoSemDuplicar_(prev.chamados, chamado) }));
       setNovoMode(false);
       setForm(novoChamadoForm(unidadeAtiva));
       setSelectedId(chamado.id);
     } catch (e) {
-      setErro("Não foi possível abrir o chamado. Tente novamente.");
+      setErro(textoDoErro_(e, "Não foi possível abrir o chamado. Tente novamente."));
     }
     setBusy(false);
   }
@@ -4127,15 +4180,14 @@ function Chamados({ state, setState, unidadeAtiva, secret, podeAbrirChamados = t
     setBusy(true);
     setErro("");
     try {
-      const res = await backendPost("novaMensagem", { chamadoId: selecionado.id, mensagem, secret });
-      if (!res.ok) throw new Error(res.error || "Erro ao enviar mensagem");
+      await backendPost("novaMensagem", { chamadoId: selecionado.id, mensagem, sessao });
       setState((prev) => ({
         ...prev,
         chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: comMensagemSemDuplicar_(c.mensagens, mensagem) } : c)),
       }));
       setReplyText("");
     } catch (e) {
-      setErro("Não foi possível enviar. Tente novamente.");
+      setErro(textoDoErro_(e, "Não foi possível enviar. Tente novamente."));
     }
     setBusy(false);
   }
@@ -4145,14 +4197,13 @@ function Chamados({ state, setState, unidadeAtiva, secret, podeAbrirChamados = t
     setBusy(true);
     setErro("");
     try {
-      const res = await backendPost("mudarStatusChamado", { chamadoId: selecionado.id, status, secret });
-      if (!res.ok) throw new Error(res.error || "Erro ao mudar status");
+      await backendPost("mudarStatusChamado", { chamadoId: selecionado.id, status, sessao });
       setState((prev) => ({
         ...prev,
         chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, status } : c)),
       }));
     } catch (e) {
-      setErro("Não foi possível mudar o status. Tente novamente.");
+      setErro(textoDoErro_(e, "Não foi possível mudar o status. Tente novamente."));
     }
     setBusy(false);
   }
@@ -4162,12 +4213,11 @@ function Chamados({ state, setState, unidadeAtiva, secret, podeAbrirChamados = t
     setBusy(true);
     setErro("");
     try {
-      const res = await backendPost("excluirChamado", { chamadoId: chamado.id, secret });
-      if (!res.ok) throw new Error(res.error || "Erro ao excluir chamado");
+      await backendPost("excluirChamado", { chamadoId: chamado.id, sessao });
       setState((prev) => ({ ...prev, chamados: prev.chamados.filter((c) => c.id !== chamado.id) }));
       if (selectedId === chamado.id) setSelectedId(null);
     } catch (e) {
-      setErro("Não foi possível excluir o chamado. Tente novamente.");
+      setErro(textoDoErro_(e, "Não foi possível excluir o chamado. Tente novamente."));
     }
     setDeleteTarget(null);
     setBusy(false);
@@ -4635,12 +4685,12 @@ function ErrorScreen({ msg, detail }) {
   );
 }
 
-function LoginPublico({ onLoggedIn, onLoggedInAdmin }) {
+function LoginPublico({ onLoggedIn, aviso = "" }) {
   const [modo, setModo] = useState("login"); // "login" | "cadastro"
   const [nome, setNome] = useState("");
   const [senha, setSenha] = useState("");
   const [busy, setBusy] = useState(false);
-  const [erro, setErro] = useState("");
+  const [erro, setErro] = useState(aviso);
 
   const [cadNome, setCadNome] = useState("");
   const [cadEmail, setCadEmail] = useState("");
@@ -4656,10 +4706,11 @@ function LoginPublico({ onLoggedIn, onLoggedInAdmin }) {
     try {
       const data = await backendLoginUnificado(nome.trim(), senha);
       if (!data.ok) throw new Error(data.error || "Erro desconhecido");
-      if (data.isAdmin) {
-        onLoggedInAdmin(data, senha);
-      } else if (data.isUser) {
-        onLoggedIn({ nome: data.nome, senha }, data.state, !!data.isAutorizado, data.foto || "", !!data.podeAbrirChamados, data.firebaseToken || "");
+      if ((data.isAdmin || data.isUser) && !data.sessao) {
+        // Backend ainda sem sessões (Codigo.gs antigo publicado).
+        setErro("O servidor ainda não foi atualizado. Avise o suporte de TI.");
+      } else if (data.isAdmin || data.isUser) {
+        onLoggedIn(data);
       } else {
         setErro(data.error || "Nome ou senha incorretos.");
       }
@@ -4826,7 +4877,9 @@ function TopBarSolicitante({ nome, foto, onFotoChange, onLogout }) {
     try {
       const dataUrl = await resizeImageParaBase64(file, 240, 0.7);
       await onFotoChange(dataUrl);
-    } catch (err) {}
+    } catch (err) {
+      window.alert(textoDoErro_(err, "Não foi possível trocar a foto. Tente novamente."));
+    }
     setFotoBusy(false);
     if (fotoInputRef.current) fotoInputRef.current.value = "";
   }
@@ -4940,14 +4993,13 @@ function ChamadosSolicitante({ state, setState, userAuth, onLogout, onFotoChange
       mensagens: [{ autor: "solicitante", texto, data: new Date().toISOString() }],
     };
     try {
-      const res = await backendPost("novoChamado", { chamado, userNome: userAuth.nome, userSenha: userAuth.senha });
-      if (!res.ok) throw new Error(res.error || "Erro ao abrir chamado");
+      await backendPost("novoChamado", { chamado, sessao: userAuth.sessao });
       setState((prev) => ({ ...prev, chamados: comChamadoSemDuplicar_(prev.chamados, chamado) }));
       setNovoMode(false);
       setForm(novoChamadoSolicitanteForm());
       setSelectedId(chamado.id);
     } catch (e) {
-      setErro("Não foi possível abrir o chamado. Tente novamente.");
+      setErro(textoDoErro_(e, "Não foi possível abrir o chamado. Tente novamente."));
     }
     setBusy(false);
   }
@@ -4959,15 +5011,14 @@ function ChamadosSolicitante({ state, setState, userAuth, onLogout, onFotoChange
     setErro("");
     const mensagem = { autor: "solicitante", texto, data: new Date().toISOString() };
     try {
-      const res = await backendPost("novaMensagem", { chamadoId: selecionado.id, mensagem, userNome: userAuth.nome, userSenha: userAuth.senha });
-      if (!res.ok) throw new Error(res.error || "Erro ao enviar mensagem");
+      await backendPost("novaMensagem", { chamadoId: selecionado.id, mensagem, sessao: userAuth.sessao });
       setState((prev) => ({
         ...prev,
         chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: comMensagemSemDuplicar_(c.mensagens, mensagem) } : c)),
       }));
       setReplyText("");
     } catch (e) {
-      setErro("Não foi possível enviar. Tente novamente.");
+      setErro(textoDoErro_(e, "Não foi possível enviar. Tente novamente."));
     }
     setBusy(false);
   }
@@ -5308,7 +5359,7 @@ function emptyAdminForm() {
   return { nome: "", senha: "", acessoTotal: true, secoes: {}, editar: false, podeAbrirChamados: true, podeResponderChamados: true, responderSoProprios: true };
 }
 
-function Administradores({ admins, secret, onAdminsChanged }) {
+function Administradores({ admins, sessao, onAdminsChanged }) {
   const [lista, setLista] = useState(admins || []);
   const [modal, setModal] = useState(null); // { mode: 'new'|'edit', original, form }
   const [error, setError] = useState("");
@@ -5351,12 +5402,12 @@ function Administradores({ admins, secret, onAdminsChanged }) {
     setBusy(true);
     setStatus(null);
     try {
-      const res = await backendPost("salvarAdmins", { secret, admins: novaLista });
+      await backendPost("salvarAdmins", { sessao, admins: novaLista });
       setLista(novaLista);
       onAdminsChanged(novaLista);
       setStatus({ type: "ok", msg: "Salvo com sucesso." });
     } catch (e) {
-      setStatus({ type: "error", msg: "Não foi possível salvar. Tente novamente." });
+      setStatus({ type: "error", msg: textoDoErro_(e, "Não foi possível salvar. Tente novamente.") });
     }
     setBusy(false);
   }
@@ -5662,7 +5713,7 @@ function emptyUsuarioForm() {
   return { nome: "", email: "", senha: "", autorizado: false, autorizadoAbreChamados: false };
 }
 
-function Usuarios({ solicitantes, secret, onSolicitantesChanged }) {
+function Usuarios({ solicitantes, sessao, onSolicitantesChanged }) {
   const [lista, setLista] = useState(solicitantes || []);
   const [modal, setModal] = useState(null); // { mode: 'new'|'edit', original, form }
   const [error, setError] = useState("");
@@ -5692,12 +5743,12 @@ function Usuarios({ solicitantes, secret, onSolicitantesChanged }) {
     setBusy(true);
     setStatus(null);
     try {
-      await backendPost("salvarSolicitantes", { secret, solicitantes: novaLista });
+      await backendPost("salvarSolicitantes", { sessao, solicitantes: novaLista });
       setLista(novaLista);
       onSolicitantesChanged(novaLista);
       setStatus({ type: "ok", msg: "Salvo com sucesso." });
     } catch (e) {
-      setStatus({ type: "error", msg: "Não foi possível salvar. Tente novamente." });
+      setStatus({ type: "error", msg: textoDoErro_(e, "Não foi possível salvar. Tente novamente.") });
     }
     setBusy(false);
   }
@@ -5953,8 +6004,22 @@ function Usuarios({ solicitantes, secret, onSolicitantesChanged }) {
   );
 }
 
+// Token da sessão (admin ou usuário) — nunca a senha. Ver criarSessao_ no
+// Codigo.gs.
+const SESSAO_STORAGE_KEY = "inventario-ti-sessao";
+// Onde versões antigas do app guardavam a SENHA pra restaurar o login. Só
+// são lidas uma vez, pra trocar por uma sessão, e apagadas em seguida.
 const SECRET_STORAGE_KEY = "inventario-ti-secret";
 const USER_STORAGE_KEY = "inventario-ti-user";
+
+function guardarSessao_(token) {
+  try {
+    if (token) localStorage.setItem(SESSAO_STORAGE_KEY, token);
+    else localStorage.removeItem(SESSAO_STORAGE_KEY);
+    localStorage.removeItem(SECRET_STORAGE_KEY);
+    localStorage.removeItem(USER_STORAGE_KEY);
+  } catch (e) {}
+}
 
 function LoadingScreen() {
   return (
@@ -5966,7 +6031,7 @@ function LoadingScreen() {
 
 const DOCK_COLLAPSED_STORAGE_KEY = "inventario-ti-dock-collapsed";
 
-function ChamadosDock({ state, setState, abertoId, onAbrirChange, secret, podeResponderChamados = true, responderSoProprios = false, meuNome = "", fotosSolicitantes = {} }) {
+function ChamadosDock({ state, setState, abertoId, onAbrirChange, sessao, podeResponderChamados = true, responderSoProprios = false, meuNome = "", fotosSolicitantes = {} }) {
   const [texto, setTexto] = useState("");
   const [busy, setBusy] = useState(false);
   const [erro, setErro] = useState("");
@@ -6007,15 +6072,14 @@ function ChamadosDock({ state, setState, abertoId, onAbrirChange, secret, podeRe
     setBusy(true);
     setErro("");
     try {
-      const res = await backendPost("novaMensagem", { chamadoId: selecionado.id, mensagem, secret });
-      if (!res.ok) throw new Error(res.error || "Erro ao enviar mensagem");
+      await backendPost("novaMensagem", { chamadoId: selecionado.id, mensagem, sessao });
       setState((prev) => ({
         ...prev,
         chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: comMensagemSemDuplicar_(c.mensagens, mensagem) } : c)),
       }));
       setTexto("");
     } catch (e) {
-      setErro("Não foi possível enviar. Tente novamente.");
+      setErro(textoDoErro_(e, "Não foi possível enviar. Tente novamente."));
     }
     setBusy(false);
   }
@@ -6186,9 +6250,11 @@ function ChamadosDock({ state, setState, abertoId, onAbrirChange, secret, podeRe
 }
 
 function App() {
-  const [secret, setSecret] = useState("");
+  // Token da sessão do admin (ver SESSAO_STORAGE_KEY). O do solicitante
+  // fica em userAuth.sessao.
+  const [sessao, setSessao] = useState("");
   const [auth, setAuth] = useState(null); // { isAdmin, nome, permissoes }
-  const [userAuth, setUserAuth] = useState(null); // { nome, senha } — solicitante logado
+  const [userAuth, setUserAuth] = useState(null); // { nome, sessao, foto, firebaseToken } — solicitante logado
   const [admins, setAdmins] = useState([]);
   const [usuarios, setUsuarios] = useState([]);
   const [fotosSolicitantes, setFotosSolicitantes] = useState({});
@@ -6197,6 +6263,7 @@ function App() {
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [loadErrorDetail, setLoadErrorDetail] = useState(null);
+  const [avisoLogin, setAvisoLogin] = useState("");
   const [view, setView] = useState("dashboard");
   const [chamadoAbertoId, setChamadoAbertoId] = useState(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -6218,8 +6285,10 @@ function App() {
   const versaoEstadoRef = useRef("");
   const filaSalvarRef = useRef(Promise.resolve());
   const [conflitoSalvar, setConflitoSalvar] = useState(false);
+  const [erroSalvar, setErroSalvar] = useState("");
+  const [tentativaSalvar, setTentativaSalvar] = useState(0);
 
-  function aplicarLoginAdmin(data, senhaUsada) {
+  function aplicarLoginAdmin(data) {
     setAuth({
       isAdmin: true,
       nome: data.nome || "Administrador",
@@ -6235,9 +6304,6 @@ function App() {
     setFotosSolicitantes(data.fotosSolicitantes || {});
     setHistorico(data.historico || []);
     setUserAuth(null);
-    try {
-      localStorage.removeItem(USER_STORAGE_KEY);
-    } catch (e) {}
     const estadoInicial = {
       prefixo: "CES",
       categorias: [],
@@ -6254,10 +6320,9 @@ function App() {
     ultimoSalvoRef.current = chaveEstadoSemChamados_(estadoInicial);
     versaoEstadoRef.current = data.stateVersao || "";
     setConflitoSalvar(false);
-    setSecret(senhaUsada);
-    try {
-      localStorage.setItem(SECRET_STORAGE_KEY, senhaUsada);
-    } catch (e) {}
+    setErroSalvar("");
+    setSessao(data.sessao);
+    guardarSessao_(data.sessao);
     const allowed = getAllowedSections(data.permissoes || "todas");
     if (pendingPatrimonio && allowed.includes("inventario")) {
       setView("inventario");
@@ -6266,83 +6331,95 @@ function App() {
     }
   }
 
-  function aplicarLoginUsuario(userCreds, estadoUsuario, isAutorizado, foto, podeAbrirChamados, firebaseToken) {
+  // data = resposta do login/restauração de um solicitante ou autorizado.
+  function aplicarLoginUsuario(data, sessaoUsuario) {
+    const isAutorizado = !!data.isAutorizado;
+    const podeAbrirChamados = !!data.podeAbrirChamados;
     setAuth(
       isAutorizado
         ? {
             isAdmin: false,
             isAutorizado: true,
-            nome: userCreds.nome,
+            nome: data.nome,
             permissoes: AUTORIZADO_PERMISSOES + (podeAbrirChamados ? ",chamados" : ""),
             editar: false,
-            podeAbrirChamados: !!podeAbrirChamados,
+            podeAbrirChamados,
           }
         : { isAdmin: false }
     );
-    // firebaseToken fica só no estado (memória), nunca no localStorage junto
-    // com userCreds — a cada visita o login/restauração manda um novo.
-    setUserAuth({ ...userCreds, foto: foto || "", firebaseToken: firebaseToken || "" });
-    setState(estadoUsuario);
+    // firebaseToken fica só no estado (memória), nunca no localStorage — a
+    // cada visita o login/restauração manda um novo.
+    setUserAuth({ nome: data.nome, sessao: sessaoUsuario, foto: data.foto || "", firebaseToken: data.firebaseToken || "" });
+    setState(data.state);
     setView("dashboard");
-    try {
-      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(userCreds));
-    } catch (e) {}
+    guardarSessao_(sessaoUsuario);
+  }
+
+  function aplicarLogin(data) {
+    setAvisoLogin("");
+    if (data.isAdmin) aplicarLoginAdmin(data);
+    else aplicarLoginUsuario(data, data.sessao);
   }
 
   async function atualizarMinhaFoto(novaFoto) {
-    const res = await backendPost("atualizarFotoUsuario", { userNome: userAuth.nome, userSenha: userAuth.senha, foto: novaFoto });
-    if (!res.ok) throw new Error(res.error || "Não foi possível salvar a foto");
+    await backendPost("atualizarFotoUsuario", { sessao: userAuth.sessao, foto: novaFoto });
     setUserAuth((prev) => ({ ...prev, foto: novaFoto }));
   }
 
-  function logoutUsuario() {
+  // Volta pra tela de login. aviso: texto mostrado lá (ex: sessão expirada).
+  function sair(aviso) {
+    const token = sessao || (userAuth && userAuth.sessao);
+    // Apaga a sessão no servidor também — sem esperar a resposta.
+    if (token && !aviso) backendPost("sair", { sessao: token }).catch(() => {});
     sairDoFirebase_();
-    try {
-      localStorage.removeItem(USER_STORAGE_KEY);
-    } catch (e) {}
+    guardarSessao_("");
+    setSessao("");
     setUserAuth(null);
     setAuth(null);
     setState(null);
+    setAvisoLogin(aviso || "");
     setLoaded(false);
     carregarInicial();
   }
 
   async function carregarInicial() {
-    let savedSecret = "";
-    let savedUser = null;
+    let sessaoSalva = "";
+    let senhaAntiga = "";
+    let usuarioAntigo = null;
     try {
-      savedSecret = localStorage.getItem(SECRET_STORAGE_KEY) || "";
-    } catch (e) {}
-    try {
+      sessaoSalva = localStorage.getItem(SESSAO_STORAGE_KEY) || "";
+      senhaAntiga = localStorage.getItem(SECRET_STORAGE_KEY) || "";
       const raw = localStorage.getItem(USER_STORAGE_KEY);
-      if (raw) savedUser = JSON.parse(raw);
+      if (raw) usuarioAntigo = JSON.parse(raw);
     } catch (e) {}
 
     try {
-      if (savedSecret) {
-        const data = await backendGet(savedSecret);
+      if (sessaoSalva) {
+        const data = await backendGetSessao(sessaoSalva);
         if (!data.ok) throw new Error(data.error || "Erro desconhecido");
         if (data.isAdmin) {
-          aplicarLoginAdmin(data, savedSecret);
+          aplicarLoginAdmin({ ...data, sessao: sessaoSalva });
           setLoaded(true);
           return;
         }
-        try {
-          localStorage.removeItem(SECRET_STORAGE_KEY);
-        } catch (e) {}
-      }
-
-      if (savedUser && savedUser.nome) {
-        const data = await backendGetUser(savedUser.nome, savedUser.senha || "");
-        if (!data.ok) throw new Error(data.error || "Erro desconhecido");
         if (data.isUser) {
-          aplicarLoginUsuario({ nome: data.nome, senha: savedUser.senha }, data.state, !!data.isAutorizado, data.foto || "", !!data.podeAbrirChamados, data.firebaseToken || "");
+          aplicarLoginUsuario(data, sessaoSalva);
           setLoaded(true);
           return;
         }
-        try {
-          localStorage.removeItem(USER_STORAGE_KEY);
-        } catch (e) {}
+        guardarSessao_("");
+        if (data.sessaoInvalida) setAvisoLogin("Sua sessão expirou. Entre de novo.");
+      } else if (senhaAntiga || (usuarioAntigo && usuarioAntigo.nome)) {
+        // Navegador de antes das sessões, com a SENHA guardada: usa ela uma
+        // última vez pra ganhar uma sessão e apaga (guardarSessao_).
+        const data = senhaAntiga ? await backendGet(senhaAntiga) : await backendGetUser(usuarioAntigo.nome, usuarioAntigo.senha || "");
+        if (!data.ok) throw new Error(data.error || "Erro desconhecido");
+        if ((data.isAdmin || data.isUser) && data.sessao) {
+          aplicarLogin(data);
+          setLoaded(true);
+          return;
+        }
+        guardarSessao_("");
       }
 
       setAuth({ isAdmin: false });
@@ -6366,6 +6443,16 @@ function App() {
     };
   }, []);
 
+  // O servidor recusou a sessão numa ação (senha trocada, conta excluída,
+  // sessão vencida): volta pra tela de login avisando.
+  const sairRef = useRef(sair);
+  sairRef.current = sair;
+  useEffect(() => {
+    const aoInvalidar = () => sairRef.current(MENSAGENS_ERRO_BACKEND.SESSAO_INVALIDA);
+    window.addEventListener(EVENTO_SESSAO_INVALIDA, aoInvalidar);
+    return () => window.removeEventListener(EVENTO_SESSAO_INVALIDA, aoInvalidar);
+  }, []);
+
   useEffect(() => {
     if (!loaded || !state || !auth || !auth.isAdmin) return;
     // Antes salvava o estado inteiro a CADA mudança de state — inclusive no
@@ -6387,18 +6474,24 @@ function App() {
       versaoEstadoRef.current = novaVersao;
       filaSalvarRef.current = filaSalvarRef.current.then(async () => {
         try {
-          await backendPost("salvarTudo", { state, secret, baseVersao, novaVersao });
-          // O POST é no-cors (não dá pra ler a resposta), então confere a
-          // versão logo depois. Só a gravação mais recente confere: se uma
-          // anterior foi recusada, esta também foi (a base dela era a outra).
-          if (versaoEstadoRef.current !== novaVersao) return;
-          const res = await backendGetVersaoEstado(secret);
-          if (res && res.ok && res.versao !== novaVersao) setConflitoSalvar(true);
-        } catch (e) {}
+          await backendPost("salvarTudo", { state, sessao, baseVersao, novaVersao });
+          setErroSalvar("");
+        } catch (e) {
+          if (e.codigo === "CONFLITO_VERSAO") {
+            setConflitoSalvar(true);
+            return;
+          }
+          if (e.codigo === "SESSAO_INVALIDA") return; // o App já volta pro login
+          // Não salvou (sem internet, servidor ocupado...): as alterações
+          // continuam na tela; "Tentar de novo" manda o estado atual.
+          if (versaoEstadoRef.current === novaVersao) versaoEstadoRef.current = baseVersao;
+          ultimoSalvoRef.current = "";
+          setErroSalvar(textoDoErro_(e, "Não foi possível salvar."));
+        }
       });
     }, 600);
     return () => clearTimeout(saveTimer.current);
-  }, [state, loaded, auth, secret]);
+  }, [state, loaded, auth, sessao, tentativaSalvar]);
 
   // Enquanto o admin está logado, os chamados passam a vir ao vivo do
   // Firestore (se configurado) em vez de só na hora do login — é o que faz
@@ -6429,17 +6522,8 @@ function App() {
     return cancelar;
   }, [userAuth && userAuth.firebaseToken, userAuth && userAuth.nome]);
 
-  function logout() {
-    sairDoFirebase_();
-    try {
-      localStorage.removeItem(SECRET_STORAGE_KEY);
-    } catch (e) {}
-    setSecret("");
-    setAuth(null);
-    setState(null);
-    setLoaded(false);
-    carregarInicial();
-  }
+  const logout = () => sair();
+  const logoutUsuario = () => sair();
 
   if (!loaded) {
     return <LoadingScreen />;
@@ -6454,7 +6538,7 @@ function App() {
       return (
         <>
           <style>{RESPONSIVE_CSS}</style>
-          <LoginPublico onLoggedIn={aplicarLoginUsuario} onLoggedInAdmin={aplicarLoginAdmin} />
+          <LoginPublico onLoggedIn={aplicarLogin} aviso={avisoLogin} />
         </>
       );
     }
@@ -6490,20 +6574,39 @@ function App() {
   return (
     <div style={{ minHeight: 640, background: COLORS.paper, fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif" }}>
       <style>{RESPONSIVE_CSS}</style>
-      {conflitoSalvar && (
+      {(conflitoSalvar || erroSalvar) && (
         <div
           role="alert"
           style={{ position: "sticky", top: 0, zIndex: 40, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, padding: "12px 16px", background: COLORS.dangerSoft, color: COLORS.danger, borderBottom: `1px solid ${COLORS.danger}`, fontSize: 14 }}
         >
-          <span style={{ flex: "1 1 260px" }}>
-            <strong>Suas últimas alterações não foram salvas.</strong> Outro administrador alterou o inventário depois que você abriu esta página. Recarregue para ver a versão atual e refaça a alteração.
-          </span>
-          <button
-            onClick={() => window.location.reload()}
-            style={{ background: COLORS.danger, color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 600, cursor: "pointer" }}
-          >
-            Recarregar
-          </button>
+          {conflitoSalvar ? (
+            <>
+              <span style={{ flex: "1 1 260px" }}>
+                <strong>Suas últimas alterações não foram salvas.</strong> Outro administrador alterou o inventário depois que você abriu esta página. Recarregue para ver a versão atual e refaça a alteração.
+              </span>
+              <button
+                onClick={() => window.location.reload()}
+                style={{ background: COLORS.danger, color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 600, cursor: "pointer" }}
+              >
+                Recarregar
+              </button>
+            </>
+          ) : (
+            <>
+              <span style={{ flex: "1 1 260px" }}>
+                <strong>Suas últimas alterações ainda não foram salvas.</strong> {erroSalvar} Não feche esta página antes de salvar.
+              </span>
+              <button
+                onClick={() => {
+                  setErroSalvar("");
+                  setTentativaSalvar((n) => n + 1);
+                }}
+                style={{ background: COLORS.danger, color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 600, cursor: "pointer" }}
+              >
+                Tentar salvar de novo
+              </button>
+            </>
+          )}
         </div>
       )}
       <div className="app-topbar-mobile" style={{ alignItems: "center", gap: 10, padding: "12px 16px", background: COLORS.ink, color: "#fff", position: "sticky", top: 0, zIndex: 30 }}>
@@ -6584,7 +6687,7 @@ function App() {
               state={state}
               setState={setState}
               unidadeAtiva={unidadeAtiva}
-              secret={secret}
+              sessao={sessao}
               podeAbrirChamados={podeAbrirChamados}
               podeResponderChamados={podeResponderChamados}
               responderSoProprios={responderSoProprios}
@@ -6595,12 +6698,12 @@ function App() {
           {view === "chamados" && allowed.has("chamados") && auth.isAutorizado && (
             <ChamadosSolicitante state={state} setState={setState} userAuth={userAuth} onLogout={logoutUsuario} onFotoChange={atualizarMinhaFoto} embedded />
           )}
-          {view === "importar" && allowed.has("importar") && <Importar state={state} setState={setState} unidadeAtiva={unidadeAtiva} secret={secret} podeEditar={podeEditar} />}
-          {view === "usuarios" && isMaster && <Usuarios solicitantes={usuarios} secret={secret} onSolicitantesChanged={setUsuarios} />}
-          {view === "administradores" && isMaster && <Administradores admins={admins} secret={secret} onAdminsChanged={setAdmins} />}
+          {view === "importar" && allowed.has("importar") && <Importar state={state} setState={setState} unidadeAtiva={unidadeAtiva} sessao={sessao} podeEditar={podeEditar} />}
+          {view === "usuarios" && isMaster && <Usuarios solicitantes={usuarios} sessao={sessao} onSolicitantesChanged={setUsuarios} />}
+          {view === "administradores" && isMaster && <Administradores admins={admins} sessao={sessao} onAdminsChanged={setAdmins} />}
         </main>
         {auth.isAdmin && view !== "chamados" && allowed.has("chamados") && (
-          <ChamadosDock state={state} setState={setState} abertoId={chamadoAbertoId} onAbrirChange={setChamadoAbertoId} secret={secret} podeResponderChamados={podeResponderChamados} responderSoProprios={responderSoProprios} meuNome={auth.nome} fotosSolicitantes={fotosSolicitantes} />
+          <ChamadosDock state={state} setState={setState} abertoId={chamadoAbertoId} onAbrirChange={setChamadoAbertoId} sessao={sessao} podeResponderChamados={podeResponderChamados} responderSoProprios={responderSoProprios} meuNome={auth.nome} fotosSolicitantes={fotosSolicitantes} />
         )}
       </div>
     </div>

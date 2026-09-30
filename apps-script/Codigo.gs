@@ -64,9 +64,249 @@ function findAdminBySecret(secret, adminsList) {
   if (!secret) return null;
   const admins = adminsList || getAdmins();
   for (let i = 0; i < admins.length; i++) {
-    if (admins[i].senha === secret) return admins[i];
+    if (senhaConfere_(secret, admins[i].senha)) return admins[i];
   }
   return null;
+}
+
+function findAdminPorNome_(nome, adminsList) {
+  const alvo = String(nome || '').trim().toLowerCase();
+  if (!alvo) return null;
+  const admins = adminsList || getAdmins();
+  for (let i = 0; i < admins.length; i++) {
+    if (admins[i].nome.trim().toLowerCase() === alvo) return admins[i];
+  }
+  return null;
+}
+
+// ---------- Senhas guardadas com hash ----------
+
+// Antes as senhas ficavam em texto puro na planilha (e, agora, também nos
+// backups diários): quem visse a planilha ou um backup via a senha de todo
+// mundo — e muita gente repete a mesma senha em outros lugares. Agora a
+// planilha guarda "h1$<repetições>$<sal>$<hash>": SHA-256 com um sal
+// aleatório por senha, repetido HASH_SENHA_ITERACOES vezes (pra deixar
+// tentativa e erro offline caro). Não dá pra voltar do hash pra senha.
+//
+// Senha em texto puro ainda é aceita — é assim que o primeiro admin é
+// digitado direto na planilha — e é trocada pelo hash no primeiro login
+// certo (ver migrarSenhaSeTextoPuro_). Pra converter todas de uma vez, rode
+// migrarSenhasParaHash pelo editor.
+const HASH_SENHA_ITERACOES = 1000;
+
+function bytesParaHex_(bytes) {
+  return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
+}
+
+function hashHex_(texto) {
+  return bytesParaHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, texto, Utilities.Charset.UTF_8));
+}
+
+// 64 caracteres hex a partir de dois UUIDs aleatórios (~244 bits) — o
+// hash só garante o formato, a aleatoriedade vem dos UUIDs.
+function hexAleatorio_() {
+  return hashHex_(Utilities.getUuid() + ':' + Utilities.getUuid());
+}
+
+function derivarHashSenha_(senha, sal, iteracoes) {
+  let atual = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, sal + ':' + senha, Utilities.Charset.UTF_8);
+  for (let i = 1; i < iteracoes; i++) {
+    atual = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, atual);
+  }
+  return bytesParaHex_(atual);
+}
+
+function ehHashDeSenha_(valor) {
+  return /^h1\$\d{1,5}\$[0-9a-f]{32}\$[0-9a-f]{64}$/.test(String(valor || ''));
+}
+
+function gerarHashSenha_(senha) {
+  const sal = hexAleatorio_().slice(0, 32);
+  return ['h1', HASH_SENHA_ITERACOES, sal, derivarHashSenha_(String(senha), sal, HASH_SENHA_ITERACOES)].join('$');
+}
+
+// Compara sem parar no primeiro caractere diferente (o tempo de resposta
+// não entrega quantos caracteres bateram).
+function textosIguais_(a, b) {
+  a = String(a); b = String(b);
+  if (a.length !== b.length) return false;
+  let diferenca = 0;
+  for (let i = 0; i < a.length; i++) diferenca |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diferenca === 0;
+}
+
+function senhaConfere_(digitada, armazenada) {
+  digitada = String(digitada || '');
+  armazenada = String(armazenada || '');
+  if (!digitada || !armazenada) return false;
+  if (!ehHashDeSenha_(armazenada)) return textosIguais_(digitada, armazenada);
+  const partes = armazenada.split('$');
+  return textosIguais_(derivarHashSenha_(digitada, partes[2], Number(partes[1])), partes[3]);
+}
+
+// O que vai pra planilha: hash continua como está (é a senha de sempre,
+// que o frontend do master devolve sem mudar quando o campo "nova senha"
+// fica em branco); qualquer outra coisa é uma senha nova digitada e vira
+// hash.
+function senhaParaGravar_(valor) {
+  valor = String(valor === undefined || valor === null ? '' : valor);
+  if (!valor || ehHashDeSenha_(valor)) return valor;
+  return gerarHashSenha_(valor);
+}
+
+// Troca por hash a senha em texto puro de UMA pessoa, logo depois de um
+// login certo. Devolve o valor que ficou gravado (o hash novo, ou o de
+// antes se não precisou/conseguiu trocar). Roda no doGet, fora da trava do
+// doPost — por isso pega a trava aqui, sem esperar muito (se não der, fica
+// pro próximo login).
+function migrarSenhaSeTextoPuro_(nomeAba, nome, senhaDigitada, armazenada) {
+  if (ehHashDeSenha_(armazenada)) return armazenada;
+  const lock = LockService.getScriptLock();
+  let temLock = false;
+  try {
+    temLock = lock.tryLock(5000);
+  } catch (err) {
+    temLock = false;
+  }
+  if (!temLock) return armazenada;
+  try {
+    const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(nomeAba);
+    if (!sh || sh.getLastRow() < 2) return armazenada;
+    const linhas = sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues();
+    const alvo = String(nome || '').trim().toLowerCase();
+    for (let i = 0; i < linhas.length; i++) {
+      if (String(linhas[i][0] || '').trim().toLowerCase() === alvo && String(linhas[i][1] || '') === armazenada) {
+        const novo = gerarHashSenha_(senhaDigitada);
+        sh.getRange(i + 2, 2).setValue(novo);
+        return novo;
+      }
+    }
+    return armazenada;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Execução manual (uma vez só, pelo editor do Apps Script): troca por hash
+// todas as senhas que ainda estão em texto puro em Admins e Solicitantes.
+function migrarSenhasParaHash() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    ['Admins', 'Solicitantes'].forEach(function (nomeAba) {
+      const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(nomeAba);
+      if (!sh || sh.getLastRow() < 2) return;
+      const faixa = sh.getRange(2, 2, sh.getLastRow() - 1, 1);
+      const senhas = faixa.getValues();
+      let trocadas = 0;
+      senhas.forEach(function (linha) {
+        const valor = String(linha[0] || '');
+        if (valor && !ehHashDeSenha_(valor)) {
+          linha[0] = gerarHashSenha_(valor);
+          trocadas++;
+        }
+      });
+      if (trocadas) faixa.setValues(senhas);
+      Logger.log(nomeAba + ': ' + trocadas + ' senha(s) convertida(s) pra hash.');
+    });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ---------- Sessões ----------
+
+// Antes, pra continuar logado depois de um F5, o navegador guardava a
+// PRÓPRIA SENHA no localStorage e mandava ela em toda requisição. Qualquer
+// coisa que lesse o localStorage (uma extensão, alguém no computador
+// compartilhado da sala) levava a senha junto. Agora o login devolve um
+// token de sessão aleatório (sem nenhuma relação com a senha), que é o
+// que o navegador guarda e manda. O servidor guarda só o hash do token nas
+// Propriedades do script, com: tipo (admin/usuário), nome, validade e uma
+// "impressão" da senha atual — trocar a senha de alguém derruba na hora
+// todas as sessões dessa pessoa, e excluir/renomear também. Sair do app
+// apaga a sessão no servidor.
+const SESSAO_PREFIXO_PROP = 'sessao_';
+const SESSAO_DURACAO_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSAO_RENOVAR_MS = 5 * 24 * 60 * 60 * 1000;
+
+function chaveSessao_(token) {
+  return SESSAO_PREFIXO_PROP + hashHex_('sessao:' + token).slice(0, 40);
+}
+
+function impressaoDaSenha_(armazenada) {
+  return hashHex_('senha:' + String(armazenada || '')).slice(0, 16);
+}
+
+function limparSessoesVencidas_(props) {
+  const todas = props.getProperties();
+  const agora = Date.now();
+  Object.keys(todas).forEach(function (chave) {
+    if (chave.indexOf(SESSAO_PREFIXO_PROP) !== 0) return;
+    let vencida = true;
+    try {
+      vencida = !(JSON.parse(todas[chave]).e > agora);
+    } catch (e) {}
+    if (vencida) props.deleteProperty(chave);
+  });
+}
+
+// tipo: 'a' (admin) ou 'u' (solicitante/autorizado).
+function criarSessao_(tipo, nome, senhaArmazenada) {
+  const token = hexAleatorio_();
+  const props = PropertiesService.getScriptProperties();
+  limparSessoesVencidas_(props);
+  props.setProperty(chaveSessao_(token), JSON.stringify({
+    t: tipo,
+    n: nome,
+    f: impressaoDaSenha_(senhaArmazenada),
+    e: Date.now() + SESSAO_DURACAO_MS,
+  }));
+  return token;
+}
+
+// Devolve { admin, admins } ou { usuario } — ou null se o token não vale
+// (não existe, venceu, a pessoa sumiu, a senha mudou, o cadastro não está
+// mais aprovado). A validade é renovada com o uso: quem abre o app pelo
+// menos uma vez por mês não precisa entrar de novo.
+function resolverSessao_(token) {
+  if (!/^[0-9a-f]{64}$/.test(String(token || ''))) return null;
+  const props = PropertiesService.getScriptProperties();
+  const chave = chaveSessao_(token);
+  const bruto = props.getProperty(chave);
+  if (!bruto) return null;
+  let sessao;
+  try {
+    sessao = JSON.parse(bruto);
+  } catch (e) {
+    sessao = null;
+  }
+  let resultado = null;
+  if (sessao && sessao.e > Date.now()) {
+    if (sessao.t === 'a') {
+      const admins = getAdmins();
+      const admin = findAdminPorNome_(sessao.n, admins);
+      if (admin && impressaoDaSenha_(admin.senha) === sessao.f) resultado = { admin: admin, admins: admins };
+    } else if (sessao.t === 'u') {
+      const alvo = String(sessao.n || '').trim().toLowerCase();
+      const usuario = getSolicitantes().filter(function (s) { return s.nome.trim().toLowerCase() === alvo; })[0];
+      if (usuario && usuario.aprovado !== false && impressaoDaSenha_(usuario.senha) === sessao.f) resultado = { usuario: usuario };
+    }
+  }
+  if (!resultado) {
+    props.deleteProperty(chave);
+    return null;
+  }
+  if (sessao.e - Date.now() < SESSAO_DURACAO_MS - SESSAO_RENOVAR_MS) {
+    sessao.e = Date.now() + SESSAO_DURACAO_MS;
+    props.setProperty(chave, JSON.stringify(sessao));
+  }
+  return resultado;
+}
+
+function encerrarSessao_(token) {
+  if (!/^[0-9a-f]{64}$/.test(String(token || ''))) return;
+  PropertiesService.getScriptProperties().deleteProperty(chaveSessao_(token));
 }
 
 // ---------- Gravação segura de abas inteiras ----------
@@ -154,7 +394,7 @@ function saveAdmins(list) {
   const rows = list.map(function (a) {
     const abrir = a.podeAbrirChamados === undefined ? !!a.editar : !!a.podeAbrirChamados;
     const responder = a.podeResponderChamados === undefined ? !!a.editar : !!a.podeResponderChamados;
-    return [a.nome, a.senha, a.permissoes, !!a.editar, abrir, responder, !!a.responderSoProprios];
+    return [a.nome, senhaParaGravar_(a.senha), a.permissoes, !!a.editar, abrir, responder, !!a.responderSoProprios];
   });
   garantirColunasTexto_(sh, COLUNAS_TEXTO_ADMINS);
   substituirLinhasComSeguranca_(sh, rows, 7);
@@ -225,7 +465,7 @@ function saveSolicitantes(list) {
   const rows = (list || []).map(function (s) {
     return [
       s.nome,
-      s.senha,
+      senhaParaGravar_(s.senha),
       s.tipo === 'autorizado' ? 'autorizado' : 'solicitante',
       s.foto || '',
       s.email || '',
@@ -276,7 +516,7 @@ function atualizarFotoSolicitante(nome, novaFoto) {
 function autenticarUsuarioLogin(nome, senha) {
   const s = findSolicitante(nome);
   if (!s) return null;
-  if (s.senha !== String(senha || '')) return null;
+  if (!senhaConfere_(senha, s.senha)) return null;
   return s;
 }
 
@@ -293,9 +533,13 @@ function autenticarUsuarioLogin(nome, senha) {
 // deveria nem conseguir logar antes disso (ver doGet).
 function authenticateSolicitante(nome, senha) {
   const s = autenticarUsuarioLogin(nome, senha);
-  if (!s || s.aprovado === false) return null;
-  if (s.tipo === 'autorizado' && !s.autorizadoAbreChamados) return null;
-  return s;
+  return usuarioPodeUsarChamados_(s) ? s : null;
+}
+
+function usuarioPodeUsarChamados_(s) {
+  if (!s || s.aprovado === false) return false;
+  if (s.tipo === 'autorizado' && !s.autorizadoAbreChamados) return false;
+  return true;
 }
 
 // ---------- Proteção contra força bruta no login ----------
@@ -408,7 +652,7 @@ function processarCadastroSolicitante_(nome, email, senha) {
   // em vez de regravar a aba inteira a cada cadastro público.
   const sh = getOrCreateSheet('Solicitantes', ['nome', 'senha', 'tipo', 'foto', 'email', 'aprovado', 'autorizadoAbreChamados']);
   garantirColunasTexto_(sh, COLUNAS_TEXTO_SOLICITANTES);
-  sh.appendRow([nome, senha, 'solicitante', '', email, false, false]);
+  sh.appendRow([nome, gerarHashSenha_(senha), 'solicitante', '', email, false, false]);
   return { ok: true };
 }
 
@@ -979,19 +1223,139 @@ function doGet(e) {
   }
 }
 
+function responderGet_(payload, callback) {
+  if (callback) {
+    return ContentService
+      .createTextOutput(callback + '(' + JSON.stringify(payload) + ');')
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  return jsonOut(payload);
+}
+
+function montarPayloadAdmin_(admin, admins) {
+  const isMaster = admin.permissoes === 'todas';
+  const state = readState();
+  // getSolicitantes() é lido pra qualquer admin autenticado (não só
+  // master) porque a foto de perfil de quem abriu um chamado precisa
+  // aparecer pro admin de Chamados também — mas só a foto vai pra quem
+  // não é master (fotosSolicitantes), nunca a lista com senha
+  // (solicitantes), que continua exclusiva do master.
+  const solicitantesList = getSolicitantes();
+  const fotosSolicitantes = {};
+  solicitantesList.forEach(function (s) {
+    if (s.foto) fotosSolicitantes[s.nome] = s.foto;
+  });
+  return {
+    ok: true,
+    isAdmin: true,
+    nome: admin.nome,
+    permissoes: admin.permissoes,
+    editar: !!admin.editar,
+    podeAbrirChamados: !!admin.podeAbrirChamados,
+    podeResponderChamados: !!admin.podeResponderChamados,
+    responderSoProprios: !!admin.responderSoProprios,
+    state: Object.assign({}, state, { chamados: listarChamados() }),
+    stateVersao: versaoEstadoAtual_(),
+    // Inclui a senha (como já fazemos pra solicitantes) porque o frontend
+    // (Administradores.save()) usa modal.original.senha pra manter a senha
+    // de quem já existe quando o campo "nova senha" fica em branco. Sem
+    // isso, editar qualquer admin (ex: só mudar uma permissão) sem
+    // redigitar a senha mandava senha undefined pro salvarAdmins e travava
+    // o login desse admin. Hoje o que vai é o HASH (ver senhaParaGravar_),
+    // não a senha em si.
+    admins: isMaster ? admins.map(function (a) {
+      return {
+        nome: a.nome,
+        senha: a.senha,
+        permissoes: a.permissoes,
+        editar: !!a.editar,
+        podeAbrirChamados: !!a.podeAbrirChamados,
+        podeResponderChamados: !!a.podeResponderChamados,
+        responderSoProprios: !!a.responderSoProprios,
+      };
+    }) : [],
+    solicitantes: isMaster ? solicitantesList : [],
+    fotosSolicitantes: fotosSolicitantes,
+    historico: getHistoricoMensal(),
+    firebaseToken: gerarTokenFirebaseAdmin_(admin)
+  };
+}
+
+function montarPayloadUsuario_(usuario) {
+  const state = readState();
+  if (usuario.tipo === 'autorizado') {
+    // Autorizado: entra como um usuário comum (não como admin), com
+    // visão só-leitura de Painel/Categorias/Salas/Inventário — sem
+    // admins/solicitantes/histórico. Por padrão também sem chamado nenhum;
+    // se autorizadoAbreChamados estiver marcado, ganha os PRÓPRIOS
+    // chamados (nunca os de outras pessoas), do mesmo jeito que um
+    // solicitante comum.
+    const podeAbrirChamados = !!usuario.autorizadoAbreChamados;
+    const alvoAutorizado = usuario.nome.trim().toLowerCase();
+    const chamadosDoAutorizado = podeAbrirChamados
+      ? listarChamados().filter(function (c) { return (c.criadoPor || '').trim().toLowerCase() === alvoAutorizado; })
+      : [];
+    return {
+      ok: true,
+      isAdmin: false,
+      isUser: true,
+      isAutorizado: true,
+      podeAbrirChamados: podeAbrirChamados,
+      nome: usuario.nome,
+      foto: usuario.foto || '',
+      firebaseToken: gerarTokenFirebaseSolicitante_(usuario),
+      state: {
+        categorias: state.categorias || [],
+        areas: state.areas || [],
+        responsaveis: state.responsaveis || [],
+        inventario: state.inventario || [],
+        chamados: chamadosDoAutorizado
+      }
+    };
+  }
+  // Usa usuario.nome (o nome de verdade, resolvido pelo login) em vez do
+  // que a pessoa digitou — desde que o login também aceita email (ver
+  // findSolicitante), comparar direto com o que foi digitado deixaria "meus
+  // chamados" vazio pra quem entra pelo email, já que criadoPor sempre
+  // guarda o nome, nunca o email.
+  const alvo = usuario.nome.trim().toLowerCase();
+  const meusChamados = listarChamados().filter(function (c) {
+    return (c.criadoPor || '').trim().toLowerCase() === alvo;
+  });
+  return {
+    ok: true,
+    isAdmin: false,
+    isUser: true,
+    nome: usuario.nome,
+    foto: usuario.foto || '',
+    firebaseToken: gerarTokenFirebaseSolicitante_(usuario),
+    state: { areas: state.areas || [], categorias: state.categorias || [], chamados: meusChamados }
+  };
+}
+
 function doGetInterno_(e) {
   const p = (e && e.parameter) || {};
   const callback = p.callback || '';
-  let payload;
 
   if (p.action === 'cadastro') {
-    payload = cadastrarSolicitanteComTrava_(p.novoNome, p.novoEmail, p.novoSenha);
-    if (callback) {
-      return ContentService
-        .createTextOutput(callback + '(' + JSON.stringify(payload) + ');')
-        .setMimeType(ContentService.MimeType.JAVASCRIPT);
+    return responderGet_(cadastrarSolicitanteComTrava_(p.novoNome, p.novoEmail, p.novoSenha), callback);
+  }
+
+  // Sessão (ver criarSessao_): o jeito normal de abrir o app depois do
+  // primeiro login. Token inválido/vencido devolve sessaoInvalida — o
+  // navegador apaga o token e mostra a tela de login.
+  if (p.sessao) {
+    const sessao = resolverSessao_(p.sessao);
+    if (!sessao) {
+      return responderGet_({ ok: true, isAdmin: false, isUser: false, sessaoInvalida: true }, callback);
     }
-    return jsonOut(payload);
+    if (sessao.admin) {
+      if (p.action === 'versaoEstado') {
+        return responderGet_({ ok: true, isAdmin: true, versao: versaoEstadoAtual_() }, callback);
+      }
+      return responderGet_(montarPayloadAdmin_(sessao.admin, sessao.admins), callback);
+    }
+    return responderGet_(montarPayloadUsuario_(sessao.usuario), callback);
   }
 
   const secret = p.secret || '';
@@ -1002,153 +1366,55 @@ function doGetInterno_(e) {
   // Nome que a pessoa digitou de verdade (adminNome e userNome chegam
   // iguais no login unificado) — usado só pra travar tentativas erradas
   // repetidas; nunca fica vazio numa tentativa de login real (só em
-  // restauração de sessão, que não passa por aqui).
+  // restauração de sessão antiga, que não passa por aqui).
   const identificadorTentativa = (userNome || adminNome || '').trim();
+  const muitasTentativas = { ok: true, isAdmin: false, isUser: false, error: 'Muitas tentativas erradas. Aguarde alguns minutos e tente de novo.' };
   if (identificadorTentativa && loginBloqueado_(identificadorTentativa)) {
-    payload = { ok: true, isAdmin: false, isUser: false, error: 'Muitas tentativas erradas. Aguarde alguns minutos e tente de novo.' };
-    if (callback) {
-      return ContentService
-        .createTextOutput(callback + '(' + JSON.stringify(payload) + ');')
-        .setMimeType(ContentService.MimeType.JAVASCRIPT);
-    }
-    return jsonOut(payload);
+    return responderGet_(muitasTentativas, callback);
   }
 
-  // Secret sem nome = restauração de sessão (ou alguém testando senhas de
-  // admin às cegas) — ver secretBloqueado_.
+  // Secret sem nome = restauração de sessão do jeito antigo (navegador que
+  // ainda tem a senha guardada — ele recebe um token de sessão e apaga a
+  // senha) ou alguém testando senhas de admin às cegas — ver secretBloqueado_.
   const secretSemNome = !!secret && !adminNome;
   if (secretSemNome && secretBloqueado_()) {
-    payload = { ok: true, isAdmin: false, isUser: false, error: 'Muitas tentativas erradas. Aguarde alguns minutos e tente de novo.' };
-    if (callback) {
-      return ContentService
-        .createTextOutput(callback + '(' + JSON.stringify(payload) + ');')
-        .setMimeType(ContentService.MimeType.JAVASCRIPT);
-    }
-    return jsonOut(payload);
+    return responderGet_(muitasTentativas, callback);
   }
 
-  const admins = secret ? getAdmins() : null;
-  let admin = findAdminBySecret(secret, admins);
-  if (secretSemNome && !admin) secretRegistrarFalha_();
-  // adminNome só vem preenchido no login de verdade (tela "Entrar como
-  // administrador"), pra exigir nome de usuário + senha, os dois batendo com
-  // o MESMO administrador — não só a senha sozinha, que antes bastava pra
-  // entrar em qualquer conta cuja senha alguém soubesse, mesmo sem saber de
-  // quem era. Uma sessão restaurada ao recarregar a página (ver
-  // carregarInicial no frontend) manda só o secret, sem adminNome — continua
-  // funcionando normal, sem pedir login de novo a cada F5.
-  if (admin && adminNome && admin.nome.trim().toLowerCase() !== adminNome.trim().toLowerCase()) {
-    admin = null;
+  let admins = secret ? getAdmins() : null;
+  let admin = null;
+  if (secret && adminNome) {
+    // Login de verdade: nome E senha precisam bater com o MESMO admin — não
+    // só a senha sozinha, que antes bastava pra entrar em qualquer conta
+    // cuja senha alguém soubesse, mesmo sem saber de quem era.
+    const candidato = findAdminPorNome_(adminNome, admins);
+    if (candidato && senhaConfere_(secret, candidato.senha)) admin = candidato;
+  } else if (secret) {
+    admin = findAdminBySecret(secret, admins);
+    if (!admin) secretRegistrarFalha_();
   }
 
+  let payload;
   if (admin && p.action === 'versaoEstado') {
-    // Consulta leve que o navegador faz depois de cada autosave pra saber
-    // se a gravação dele foi aceita (ver VERSAO_ESTADO_PROP) — sem ler a
-    // planilha inteira como o login faz.
+    // Navegador antigo (de antes das sessões) conferindo o autosave.
     payload = { ok: true, isAdmin: true, versao: versaoEstadoAtual_() };
   } else if (admin) {
     if (identificadorTentativa) loginLimparTentativas_(identificadorTentativa);
-    const isMaster = admin.permissoes === 'todas';
-    const state = readState();
-    // getSolicitantes() é lido pra qualquer admin autenticado (não só
-    // master) porque a foto de perfil de quem abriu um chamado precisa
-    // aparecer pro admin de Chamados também — mas só a foto vai pra quem
-    // não é master (fotosSolicitantes), nunca a lista com senha
-    // (solicitantes), que continua exclusiva do master.
-    const solicitantesList = getSolicitantes();
-    const fotosSolicitantes = {};
-    solicitantesList.forEach(function (s) {
-      if (s.foto) fotosSolicitantes[s.nome] = s.foto;
-    });
-    payload = {
-      ok: true,
-      isAdmin: true,
-      nome: admin.nome,
-      permissoes: admin.permissoes,
-      editar: !!admin.editar,
-      podeAbrirChamados: !!admin.podeAbrirChamados,
-      podeResponderChamados: !!admin.podeResponderChamados,
-      responderSoProprios: !!admin.responderSoProprios,
-      state: Object.assign({}, state, { chamados: listarChamados() }),
-      stateVersao: versaoEstadoAtual_(),
-      // Inclui a senha (como já fazemos pra solicitantes) porque o frontend
-      // (Administradores.save()) usa modal.original.senha pra manter a senha
-      // de quem já existe quando o campo "nova senha" fica em branco. Sem
-      // isso, editar qualquer admin (ex: só mudar uma permissão) sem
-      // redigitar a senha mandava senha undefined pro salvarAdmins e travava
-      // o login desse admin — bug real, encontrado numa validação de
-      // segurança antes de liberar pra uso real.
-      admins: isMaster ? admins.map(function (a) {
-        return {
-          nome: a.nome,
-          senha: a.senha,
-          permissoes: a.permissoes,
-          editar: !!a.editar,
-          podeAbrirChamados: !!a.podeAbrirChamados,
-          podeResponderChamados: !!a.podeResponderChamados,
-          responderSoProprios: !!a.responderSoProprios,
-        };
-      }) : [],
-      solicitantes: isMaster ? solicitantesList : [],
-      fotosSolicitantes: fotosSolicitantes,
-      historico: getHistoricoMensal(),
-      firebaseToken: gerarTokenFirebaseAdmin_(admin)
-    };
+    const senhaArmazenada = migrarSenhaSeTextoPuro_('Admins', admin.nome, secret, admin.senha);
+    // Se a senha acabou de virar hash, relê a lista pra o master não
+    // receber (e depois devolver) o valor antigo.
+    if (senhaArmazenada !== admin.senha) admins = getAdmins();
+    payload = montarPayloadAdmin_(admin, admins);
+    payload.sessao = criarSessao_('a', admin.nome, senhaArmazenada);
   } else if (userNome) {
     const usuario = autenticarUsuarioLogin(userNome, userSenha);
     if (usuario && identificadorTentativa) loginLimparTentativas_(identificadorTentativa);
     if (usuario && usuario.aprovado === false) {
       payload = { ok: true, isAdmin: false, isUser: false, error: 'Seu cadastro ainda está aguardando aprovação de um administrador.' };
-    } else if (usuario && usuario.tipo === 'autorizado') {
-      // Autorizado: entra como um usuário comum (não como admin), com
-      // visão só-leitura de Painel/Categorias/Salas/Inventário — sem
-      // admins/solicitantes/histórico. Por padrão também sem chamado nenhum;
-      // se autorizadoAbreChamados estiver marcado, ganha os PRÓPRIOS
-      // chamados (nunca os de outras pessoas), do mesmo jeito que um
-      // solicitante comum — ver o "alvo"/filtro logo abaixo, no ramo normal.
-      const state = readState();
-      const podeAbrirChamados = !!usuario.autorizadoAbreChamados;
-      const alvoAutorizado = usuario.nome.trim().toLowerCase();
-      const chamadosDoAutorizado = podeAbrirChamados
-        ? listarChamados().filter(function (c) { return (c.criadoPor || '').trim().toLowerCase() === alvoAutorizado; })
-        : [];
-      payload = {
-        ok: true,
-        isAdmin: false,
-        isUser: true,
-        isAutorizado: true,
-        podeAbrirChamados: podeAbrirChamados,
-        nome: usuario.nome,
-        foto: usuario.foto || '',
-        firebaseToken: gerarTokenFirebaseSolicitante_(usuario),
-        state: {
-          categorias: state.categorias || [],
-          areas: state.areas || [],
-          responsaveis: state.responsaveis || [],
-          inventario: state.inventario || [],
-          chamados: chamadosDoAutorizado
-        }
-      };
     } else if (usuario) {
-      const state = readState();
-      // Usa usuario.nome (o nome de verdade, resolvido pelo login) em vez do
-      // que a pessoa digitou em userNome — desde que o login também aceita
-      // email (ver findSolicitante), comparar direto com o que foi digitado
-      // deixaria "meus chamados" vazio pra quem entra pelo email, já que
-      // criadoPor sempre guarda o nome, nunca o email.
-      const alvo = usuario.nome.trim().toLowerCase();
-      const meusChamados = listarChamados().filter(function (c) {
-        return (c.criadoPor || '').trim().toLowerCase() === alvo;
-      });
-      payload = {
-        ok: true,
-        isAdmin: false,
-        isUser: true,
-        nome: usuario.nome,
-        foto: usuario.foto || '',
-        firebaseToken: gerarTokenFirebaseSolicitante_(usuario),
-        state: { areas: state.areas || [], categorias: state.categorias || [], chamados: meusChamados }
-      };
+      const senhaArmazenada = migrarSenhaSeTextoPuro_('Solicitantes', usuario.nome, userSenha, usuario.senha);
+      payload = montarPayloadUsuario_(usuario);
+      payload.sessao = criarSessao_('u', usuario.nome, senhaArmazenada);
     } else {
       if (identificadorTentativa) loginRegistrarFalha_(identificadorTentativa);
       payload = { ok: true, isAdmin: false, isUser: false, error: 'Nome ou senha incorretos.' };
@@ -1157,13 +1423,9 @@ function doGetInterno_(e) {
     payload = { ok: true, isAdmin: false, isUser: false, state: { areas: [], categorias: [], chamados: [] } };
   }
 
-  if (callback) {
-    return ContentService
-      .createTextOutput(callback + '(' + JSON.stringify(payload) + ');')
-      .setMimeType(ContentService.MimeType.JAVASCRIPT);
-  }
-  return jsonOut(payload);
+  return responderGet_(payload, callback);
 }
+
 
 // Toda ação de doPost segue o padrão "lê o estado inteiro -> muda um pedaço
 // -> escreve o estado inteiro de volta" (readState/writeState). Sem
@@ -1200,11 +1462,26 @@ function doPost(e) {
 
 function doPostComTrava(e) {
   const body = JSON.parse(e.postData.contents);
-  // doPost de admin sempre manda só o secret, sem nome — mesmo contador
-  // geral do doGet (ver secretBloqueado_). Bloqueado, o secret é ignorado:
-  // a ação segue como se fosse de alguém não logado como admin.
+
+  if (body.action === 'sair') {
+    encerrarSessao_(body.sessao);
+    return jsonOut({ ok: true });
+  }
+
+  // Sessão (ver criarSessao_) é o jeito normal. Os campos antigos (secret
+  // do admin, userNome+userSenha do solicitante) continuam aceitos pra não
+  // quebrar uma aba que ficou aberta desde antes dessa mudança.
   let admin = null;
-  if (body.secret && !secretBloqueado_()) {
+  let usuarioDaSessao = null;
+  if (body.sessao) {
+    const sessao = resolverSessao_(body.sessao);
+    if (!sessao) return jsonOut({ ok: false, error: 'SESSAO_INVALIDA' });
+    admin = sessao.admin || null;
+    usuarioDaSessao = sessao.usuario || null;
+  } else if (body.secret && !secretBloqueado_()) {
+    // doPost de admin do jeito antigo manda só o secret, sem nome — mesmo
+    // contador geral do doGet (ver secretBloqueado_). Bloqueado, o secret é
+    // ignorado: a ação segue como se fosse de alguém não logado como admin.
     admin = findAdminBySecret(body.secret);
     if (!admin) secretRegistrarFalha_();
   }
@@ -1227,6 +1504,26 @@ function doPostComTrava(e) {
   function podeMexerNesseChamado_(chamado) {
     if (!adminResponderSoProprios) return true;
     return chamado && chamado.abertoPorAdmin === admin.nome;
+  }
+  // Solicitante (ou autorizado que abre chamados) que está fazendo o pedido.
+  function solicitanteDoPedido_() {
+    if (usuarioDaSessao) return usuarioPodeUsarChamados_(usuarioDaSessao) ? usuarioDaSessao : null;
+    if (body.sessao) return null;
+    return authenticateSolicitante(body.userNome, body.userSenha);
+  }
+
+  // Confirmação de senha antes de uma ação perigosa (ex: apagar o
+  // inventário inteiro de uma unidade, em Importar/Exportar). Antes o
+  // navegador comparava com a senha guardada nele; agora ele não tem mais a
+  // senha, então quem confere é o servidor — com o mesmo limite de
+  // tentativas erradas do login.
+  if (isAdmin && body.action === 'conferirSenha') {
+    if (loginBloqueado_(admin.nome)) {
+      return jsonOut({ ok: false, error: 'Muitas tentativas erradas. Aguarde alguns minutos e tente de novo.' });
+    }
+    const valida = senhaConfere_(body.senha, admin.senha);
+    if (valida) loginLimparTentativas_(admin.nome); else loginRegistrarFalha_(admin.nome);
+    return jsonOut({ ok: true, valida: valida });
   }
 
   if (isAdmin && body.action === 'salvarTudo') {
@@ -1279,7 +1576,7 @@ function doPostComTrava(e) {
   // ambos os tipos podem mudar a própria foto) e só mexe na foto, nunca em
   // nome/senha/tipo de ninguém.
   if (body.action === 'atualizarFotoUsuario') {
-    const usuario = autenticarUsuarioLogin(body.userNome, body.userSenha);
+    const usuario = usuarioDaSessao || (body.sessao ? null : autenticarUsuarioLogin(body.userNome, body.userSenha));
     if (!usuario) {
       return jsonOut({ ok: false, error: 'Não autenticado' });
     }
@@ -1293,7 +1590,7 @@ function doPostComTrava(e) {
   // admin) e o autor/criadoPor são fixados pelo servidor, nunca aceitos do
   // jeito que o cliente mandou.
   if (body.action === 'novoChamado') {
-    const solicitante = authenticateSolicitante(body.userNome, body.userSenha);
+    const solicitante = solicitanteDoPedido_();
     if (!adminPodeAbrirChamados && !solicitante) {
       return jsonOut({ ok: false, error: 'Não autenticado' });
     }
@@ -1359,7 +1656,7 @@ function doPostComTrava(e) {
   }
 
   if (body.action === 'novaMensagem') {
-    const solicitante = authenticateSolicitante(body.userNome, body.userSenha);
+    const solicitante = solicitanteDoPedido_();
     if (!adminPodeResponderChamados && !solicitante) {
       return jsonOut({ ok: false, error: 'Não autenticado' });
     }
