@@ -808,6 +808,24 @@ function writeState(obj) {
   sh.getRange(2, 1, chunks.length, 1).setValues(chunks);
 }
 
+// ---------- Versão do estado (controle de concorrência entre admins) ----------
+
+// O autosave manda o ESTADO INTEIRO (inventário, categorias, salas...). Sem
+// controle, um admin com a aba aberta desde cedo, ao salvar, gravava a cópia
+// DELE por cima — apagando o que outro admin tinha editado nesse meio tempo.
+// Agora cada gravação vem com a versão em que ela se baseou (baseVersao) e a
+// versão nova que ela cria (novaVersao, gerada no navegador — o POST é
+// no-cors e o navegador não consegue ler a resposta). Se a baseVersao não
+// for a atual, alguém salvou antes: a gravação é recusada e o navegador,
+// ao conferir a versão logo depois (action=versaoEstado no doGet), avisa a
+// pessoa pra recarregar. Navegador antigo (sem baseVersao, de antes dessa
+// mudança) continua sendo aceito, pra não quebrar quem ainda não recarregou.
+const VERSAO_ESTADO_PROP = 'appStateVersao';
+
+function versaoEstadoAtual_() {
+  return PropertiesService.getScriptProperties().getProperty(VERSAO_ESTADO_PROP) || '';
+}
+
 function jsonOut(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
@@ -925,7 +943,12 @@ function doGet(e) {
     admin = null;
   }
 
-  if (admin) {
+  if (admin && p.action === 'versaoEstado') {
+    // Consulta leve que o navegador faz depois de cada autosave pra saber
+    // se a gravação dele foi aceita (ver VERSAO_ESTADO_PROP) — sem ler a
+    // planilha inteira como o login faz.
+    payload = { ok: true, isAdmin: true, versao: versaoEstadoAtual_() };
+  } else if (admin) {
     if (identificadorTentativa) loginLimparTentativas_(identificadorTentativa);
     const isMaster = admin.permissoes === 'todas';
     const state = readState();
@@ -949,6 +972,7 @@ function doGet(e) {
       podeResponderChamados: !!admin.podeResponderChamados,
       responderSoProprios: !!admin.responderSoProprios,
       state: Object.assign({}, state, { chamados: listarChamados() }),
+      stateVersao: versaoEstadoAtual_(),
       // Inclui a senha (como já fazemos pra solicitantes) porque o frontend
       // (Administradores.save()) usa modal.original.senha pra manter a senha
       // de quem já existe quando o campo "nova senha" fica em branco. Sem
@@ -1108,8 +1132,16 @@ function doPostComTrava(e) {
   }
 
   if (isAdmin && body.action === 'salvarTudo') {
+    // Ver VERSAO_ESTADO_PROP: recusa cópia baseada numa versão que não é
+    // mais a atual (outro admin salvou antes).
+    const props = PropertiesService.getScriptProperties();
+    if (body.baseVersao !== undefined && String(body.baseVersao) !== versaoEstadoAtual_()) {
+      return jsonOut({ ok: false, error: 'CONFLITO_VERSAO' });
+    }
     const estadoFiltrado = filtrarEstadoPorPermissao(body.state, admin);
     writeState(estadoFiltrado);
+    const novaVersao = String(body.novaVersao || '');
+    props.setProperty(VERSAO_ESTADO_PROP, /^[A-Za-z0-9-]{1,40}$/.test(novaVersao) ? novaVersao : Utilities.getUuid());
     registrarSnapshotMensal(estadoFiltrado);
     return jsonOut({ ok: true });
   }

@@ -237,6 +237,19 @@ async function jsonpRequestComRetry(url) {
   }
 }
 
+// Consulta leve (só a versão do estado, sem baixar inventário/chamados) —
+// usada depois de cada autosave pra saber se a gravação foi aceita. Ver
+// VERSAO_ESTADO_PROP no Codigo.gs.
+async function backendGetVersaoEstado(secret) {
+  return jsonpRequestComRetry(BACKEND_URL + "?action=versaoEstado&secret=" + encodeURIComponent(secret));
+}
+
+// Chave pra comparar se o que o autosave grava (tudo menos chamados, que têm
+// ações próprias no backend) mudou desde a última gravação/carregamento.
+function chaveEstadoSemChamados_(state) {
+  return JSON.stringify({ ...state, chamados: undefined });
+}
+
 async function backendGet(secret, adminNome) {
   const params = [];
   if (secret) params.push("secret=" + encodeURIComponent(secret));
@@ -6200,6 +6213,11 @@ function App() {
   const [pendingTipoAreaFiltro, setPendingTipoAreaFiltro] = useState(null);
   const [unidadeAtiva, setUnidadeAtiva] = useState("colegio");
   const saveTimer = useRef(null);
+  // Autosave: ver o useEffect do autosave mais abaixo.
+  const ultimoSalvoRef = useRef("");
+  const versaoEstadoRef = useRef("");
+  const filaSalvarRef = useRef(Promise.resolve());
+  const [conflitoSalvar, setConflitoSalvar] = useState(false);
 
   function aplicarLoginAdmin(data, senhaUsada) {
     setAuth({
@@ -6220,7 +6238,7 @@ function App() {
     try {
       localStorage.removeItem(USER_STORAGE_KEY);
     } catch (e) {}
-    setState({
+    const estadoInicial = {
       prefixo: "CES",
       categorias: [],
       areas: [],
@@ -6229,7 +6247,13 @@ function App() {
       chamados: [],
       ...data.state,
       categorias: normalizarCategorias((data.state && data.state.categorias) || []),
-    });
+    };
+    setState(estadoInicial);
+    // O que acabou de vir do servidor já está salvo — o autosave só grava
+    // quando algo mudar a partir daqui.
+    ultimoSalvoRef.current = chaveEstadoSemChamados_(estadoInicial);
+    versaoEstadoRef.current = data.stateVersao || "";
+    setConflitoSalvar(false);
     setSecret(senhaUsada);
     try {
       localStorage.setItem(SECRET_STORAGE_KEY, senhaUsada);
@@ -6344,9 +6368,34 @@ function App() {
 
   useEffect(() => {
     if (!loaded || !state || !auth || !auth.isAdmin) return;
+    // Antes salvava o estado inteiro a CADA mudança de state — inclusive no
+    // login e a cada chamado que chegava ao vivo. Com a aba aberta há horas,
+    // isso gravava o inventário antigo daquela aba por cima do que outro
+    // admin tinha editado. Agora só salva quando o que o autosave grava
+    // (tudo menos chamados) mudou de verdade.
+    const chave = chaveEstadoSemChamados_(state);
+    if (chave === ultimoSalvoRef.current) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      backendPost("salvarTudo", { state, secret }).catch(() => {});
+      ultimoSalvoRef.current = chave;
+      // Controle de versão (ver VERSAO_ESTADO_PROP no Codigo.gs): o servidor
+      // recusa a gravação se outro admin salvou depois da versão em que
+      // esta tela se baseou. As gravações vão em fila, uma de cada vez, pra
+      // chegarem ao servidor na ordem certa.
+      const baseVersao = versaoEstadoRef.current;
+      const novaVersao = uid("V");
+      versaoEstadoRef.current = novaVersao;
+      filaSalvarRef.current = filaSalvarRef.current.then(async () => {
+        try {
+          await backendPost("salvarTudo", { state, secret, baseVersao, novaVersao });
+          // O POST é no-cors (não dá pra ler a resposta), então confere a
+          // versão logo depois. Só a gravação mais recente confere: se uma
+          // anterior foi recusada, esta também foi (a base dela era a outra).
+          if (versaoEstadoRef.current !== novaVersao) return;
+          const res = await backendGetVersaoEstado(secret);
+          if (res && res.ok && res.versao !== novaVersao) setConflitoSalvar(true);
+        } catch (e) {}
+      });
     }, 600);
     return () => clearTimeout(saveTimer.current);
   }, [state, loaded, auth, secret]);
@@ -6441,6 +6490,22 @@ function App() {
   return (
     <div style={{ minHeight: 640, background: COLORS.paper, fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif" }}>
       <style>{RESPONSIVE_CSS}</style>
+      {conflitoSalvar && (
+        <div
+          role="alert"
+          style={{ position: "sticky", top: 0, zIndex: 40, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, padding: "12px 16px", background: COLORS.dangerSoft, color: COLORS.danger, borderBottom: `1px solid ${COLORS.danger}`, fontSize: 14 }}
+        >
+          <span style={{ flex: "1 1 260px" }}>
+            <strong>Suas últimas alterações não foram salvas.</strong> Outro administrador alterou o inventário depois que você abriu esta página. Recarregue para ver a versão atual e refaça a alteração.
+          </span>
+          <button
+            onClick={() => window.location.reload()}
+            style={{ background: COLORS.danger, color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 600, cursor: "pointer" }}
+          >
+            Recarregar
+          </button>
+        </div>
+      )}
       <div className="app-topbar-mobile" style={{ alignItems: "center", gap: 10, padding: "12px 16px", background: COLORS.ink, color: "#fff", position: "sticky", top: 0, zIndex: 30 }}>
         <button
           onClick={() => setMobileMenuOpen(true)}
