@@ -608,11 +608,9 @@ function secretRegistrarFalha_() {
 // qualquer pessoa pode se cadastrar sozinha direto na tela de login (nome +
 // email + senha escolhida por ela) — mas a conta nasce com aprovado=false e
 // não consegue entrar até um administrador aprovar em Usuários. Roda dentro
-// do doGet (não do doPost) porque o cadastro precisa de uma resposta de
-// verdade pro navegador saber se o email já existe ou não (doPost, por usar
-// fetch em modo no-cors pra evitar problema de CORS do Apps Script, nunca
-// consegue ler a resposta — só sabe se a requisição saiu, não o que o
-// servidor respondeu). Isso só é seguro por causa do LockService em
+// do doGet (não do doPost) porque, quando foi feito, o doPost ia em modo
+// no-cors e o navegador não conseguia ler a resposta (hoje consegue — ver
+// backendPost no app.jsx). Isso só é seguro por causa do LockService em
 // cadastrarSolicitanteComTrava_: sem a trava, duas pessoas se cadastrando
 // com o mesmo email ao mesmo tempo poderiam duplicar a conta — o mesmo
 // problema de concorrência que o doPost já resolve pras outras escritas.
@@ -1137,11 +1135,11 @@ function writeState(obj) {
 // controle, um admin com a aba aberta desde cedo, ao salvar, gravava a cópia
 // DELE por cima — apagando o que outro admin tinha editado nesse meio tempo.
 // Agora cada gravação vem com a versão em que ela se baseou (baseVersao) e a
-// versão nova que ela cria (novaVersao, gerada no navegador — o POST é
-// no-cors e o navegador não consegue ler a resposta). Se a baseVersao não
-// for a atual, alguém salvou antes: a gravação é recusada e o navegador,
-// ao conferir a versão logo depois (action=versaoEstado no doGet), avisa a
-// pessoa pra recarregar. Navegador antigo (sem baseVersao, de antes dessa
+// versão nova que ela cria (novaVersao, gerada no navegador). Se a
+// baseVersao não for a atual, alguém salvou antes: a gravação é recusada
+// com CONFLITO_VERSAO e o navegador avisa a pessoa pra recarregar
+// (action=versaoEstado no doGet ficou só pra navegadores antigos, da época
+// em que o POST era no-cors e a resposta não podia ser lida). Navegador antigo (sem baseVersao, de antes dessa
 // mudança) continua sendo aceito, pra não quebrar quem ainda não recarregou.
 const VERSAO_ESTADO_PROP = 'appStateVersao';
 
@@ -1600,9 +1598,9 @@ function doPostComTrava(e) {
     // chamado de OUTRA pessoa mandando o mesmo id, abrir chamado já
     // "Resolvido" ou colocar mensagem com autor 'ti'. Agora o servidor monta
     // o chamado e só aproveita do cliente os campos que a pessoa preenche.
-    // O id continua vindo do cliente (o POST é no-cors, o frontend nunca lê
-    // a resposta e já usa esse id na tela pra mandar as próximas mensagens),
-    // mas só se tiver o formato do uid("CH") e ainda não existir.
+    // O id continua vindo do cliente (o frontend já usa esse id na tela pra
+    // mandar as próximas mensagens), mas só se tiver o formato do uid("CH")
+    // e ainda não existir.
     const recebido = body.chamado || {};
     const idRecebido = String(recebido.id || '');
     if (!/^CH-[A-Z0-9]{1,20}$/.test(idRecebido)) {
