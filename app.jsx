@@ -381,7 +381,11 @@ function comMensagemSemDuplicar_(mensagens, nova) {
 // Retorna uma função pra cancelar a assinatura (chamar no cleanup do
 // useEffect / no logout). onChange recebe a lista inteira de chamados toda
 // vez que algo muda no Firestore (documento novo, editado ou removido).
-function assinarChamadosAoVivo(token, onChange) {
+// soDeQuemCriou: nome do solicitante logado. Sem ele (admin) escuta a
+// coleção inteira; com ele, só os chamados em que criadoPor é essa pessoa —
+// e o filtro precisa ir na consulta, não só na tela: a regra do Firestore
+// recusa a consulta inteira se ela puder devolver chamado de outra pessoa.
+function assinarChamadosAoVivo(token, onChange, soDeQuemCriou) {
   let cancelado = false;
   let unsubscribeSnapshot = null;
   const appPromise = getFirebaseApp_(token);
@@ -395,10 +399,9 @@ function assinarChamadosAoVivo(token, onChange) {
   appPromise
     .then(() => {
       if (cancelado) return;
-      unsubscribeSnapshot = window.firebase
-        .firestore()
-        .collection("chamados")
-        .onSnapshot(
+      const colecao = window.firebase.firestore().collection("chamados");
+      const consulta = soDeQuemCriou ? colecao.where("criadoPor", "==", soDeQuemCriou) : colecao;
+      unsubscribeSnapshot = consulta.onSnapshot(
           (snapshot) => {
             const lista = snapshot.docs.map((d) => d.data());
             onChange(lista);
@@ -4643,7 +4646,7 @@ function LoginPublico({ onLoggedIn, onLoggedInAdmin }) {
       if (data.isAdmin) {
         onLoggedInAdmin(data, senha);
       } else if (data.isUser) {
-        onLoggedIn({ nome: data.nome, senha }, data.state, !!data.isAutorizado, data.foto || "", !!data.podeAbrirChamados);
+        onLoggedIn({ nome: data.nome, senha }, data.state, !!data.isAutorizado, data.foto || "", !!data.podeAbrirChamados, data.firebaseToken || "");
       } else {
         setErro(data.error || "Nome ou senha incorretos.");
       }
@@ -6239,7 +6242,7 @@ function App() {
     }
   }
 
-  function aplicarLoginUsuario(userCreds, estadoUsuario, isAutorizado, foto, podeAbrirChamados) {
+  function aplicarLoginUsuario(userCreds, estadoUsuario, isAutorizado, foto, podeAbrirChamados, firebaseToken) {
     setAuth(
       isAutorizado
         ? {
@@ -6252,7 +6255,9 @@ function App() {
           }
         : { isAdmin: false }
     );
-    setUserAuth({ ...userCreds, foto: foto || "" });
+    // firebaseToken fica só no estado (memória), nunca no localStorage junto
+    // com userCreds — a cada visita o login/restauração manda um novo.
+    setUserAuth({ ...userCreds, foto: foto || "", firebaseToken: firebaseToken || "" });
     setState(estadoUsuario);
     setView("dashboard");
     try {
@@ -6267,6 +6272,7 @@ function App() {
   }
 
   function logoutUsuario() {
+    sairDoFirebase_();
     try {
       localStorage.removeItem(USER_STORAGE_KEY);
     } catch (e) {}
@@ -6306,7 +6312,7 @@ function App() {
         const data = await backendGetUser(savedUser.nome, savedUser.senha || "");
         if (!data.ok) throw new Error(data.error || "Erro desconhecido");
         if (data.isUser) {
-          aplicarLoginUsuario({ nome: data.nome, senha: savedUser.senha }, data.state, !!data.isAutorizado, data.foto || "", !!data.podeAbrirChamados);
+          aplicarLoginUsuario({ nome: data.nome, senha: savedUser.senha }, data.state, !!data.isAutorizado, data.foto || "", !!data.podeAbrirChamados, data.firebaseToken || "");
           setLoaded(true);
           return;
         }
@@ -6357,6 +6363,22 @@ function App() {
     });
     return cancelar;
   }, [auth && auth.isAdmin, auth && auth.firebaseToken]);
+
+  // Mesma coisa pro solicitante (e autorizado que abre chamados): antes ele
+  // só via a resposta do TI dando F5. Escuta só os próprios chamados — ver
+  // gerarTokenFirebaseSolicitante_ no Codigo.gs e o filtro em
+  // assinarChamadosAoVivo.
+  useEffect(() => {
+    if (!userAuth || !userAuth.firebaseToken || !userAuth.nome) return;
+    const cancelar = assinarChamadosAoVivo(
+      userAuth.firebaseToken,
+      (meusChamados) => {
+        setState((prev) => (prev ? { ...prev, chamados: meusChamados } : prev));
+      },
+      userAuth.nome
+    );
+    return cancelar;
+  }, [userAuth && userAuth.firebaseToken, userAuth && userAuth.nome]);
 
   function logout() {
     sairDoFirebase_();

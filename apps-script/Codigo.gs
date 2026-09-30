@@ -655,16 +655,37 @@ function base64UrlSemPadding_(valor) {
 }
 
 function gerarTokenFirebaseAdmin_(admin) {
+  if (!adminVeChamados_(admin)) return '';
+  return gerarTokenFirebase_('admin', admin.nome, { chamados: true });
+}
+
+// Mesma ideia pro solicitante (e pro "autorizado" que pode abrir chamados):
+// a marca "solicitante" leva o nome EXATO como está cadastrado — o mesmo
+// que o servidor grava em criadoPor ao abrir o chamado (ver novoChamado) —
+// e as regras do Firestore só liberam os chamados em que os dois batem:
+//
+//   allow read: if request.auth != null && (
+//     request.auth.token.chamados == true ||
+//     (request.auth.token.solicitante is string &&
+//      resource.data.criadoPor == request.auth.token.solicitante));
+//
+// Ou seja: cada solicitante enxerga ao vivo só os próprios chamados, nunca
+// os de outra pessoa — igual ao filtro "meusChamados" do doGet.
+function gerarTokenFirebaseSolicitante_(usuario) {
+  if (usuario.tipo === 'autorizado' && !usuario.autorizadoAbreChamados) return '';
+  return gerarTokenFirebase_('user', usuario.nome, { solicitante: usuario.nome });
+}
+
+function gerarTokenFirebase_(prefixoUid, nome, claims) {
   try {
-    if (!adminVeChamados_(admin)) return '';
     const props = PropertiesService.getScriptProperties();
     const email = props.getProperty('FIREBASE_CLIENT_EMAIL');
     const chavePrivada = props.getProperty('FIREBASE_PRIVATE_KEY');
     if (!email || !chavePrivada) return '';
-    // uid estável por admin, sem expor o nome (o uid aparece no painel
+    // uid estável por pessoa, sem expor o nome (o uid aparece no painel
     // Authentication do Firebase) e sempre dentro do limite de 128 chars.
-    const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, 'admin:' + admin.nome.trim().toLowerCase(), Utilities.Charset.UTF_8);
-    const uid = 'admin-' + digest.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('').slice(0, 32);
+    const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, prefixoUid + ':' + String(nome || '').trim().toLowerCase(), Utilities.Charset.UTF_8);
+    const uid = prefixoUid + '-' + digest.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('').slice(0, 32);
     const agora = Math.floor(Date.now() / 1000);
     const header = { alg: 'RS256', typ: 'JWT' };
     const payload = {
@@ -674,7 +695,7 @@ function gerarTokenFirebaseAdmin_(admin) {
       iat: agora,
       exp: agora + 3600,
       uid: uid,
-      claims: { chamados: true },
+      claims: claims,
     };
     const entrada = base64UrlSemPadding_(Utilities.newBlob(JSON.stringify(header)).getBytes()) + '.' +
       base64UrlSemPadding_(Utilities.newBlob(JSON.stringify(payload)).getBytes());
@@ -682,7 +703,7 @@ function gerarTokenFirebaseAdmin_(admin) {
     const assinatura = Utilities.computeRsaSha256Signature(entrada, chavePrivada.replace(/\\n/g, '\n'));
     return entrada + '.' + base64UrlSemPadding_(assinatura);
   } catch (err) {
-    Logger.log('Falha ao gerar token do Firebase pro admin: ' + err);
+    Logger.log('Falha ao gerar token do Firebase (' + prefixoUid + '): ' + err);
     return '';
   }
 }
@@ -933,6 +954,7 @@ function doGet(e) {
         podeAbrirChamados: podeAbrirChamados,
         nome: usuario.nome,
         foto: usuario.foto || '',
+        firebaseToken: gerarTokenFirebaseSolicitante_(usuario),
         state: {
           categorias: state.categorias || [],
           areas: state.areas || [],
@@ -958,6 +980,7 @@ function doGet(e) {
         isUser: true,
         nome: usuario.nome,
         foto: usuario.foto || '',
+        firebaseToken: gerarTokenFirebaseSolicitante_(usuario),
         state: { areas: state.areas || [], categorias: state.categorias || [], chamados: meusChamados }
       };
     } else {
