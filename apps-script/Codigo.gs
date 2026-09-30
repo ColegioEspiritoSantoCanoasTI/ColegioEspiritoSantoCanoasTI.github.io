@@ -771,41 +771,70 @@ function migrarChamadosParaFirestore() {
 // listarChamados/salvarChamado_/etc acima). Se o bloco salvo aqui ainda
 // tiver um campo "chamados" de antes da migração, ele é descartado: quem
 // precisar dos chamados usa listarChamados().
+//
+// Antes, se o JSON salvo não pudesse ser lido, readState devolvia um estado
+// VAZIO como se estivesse tudo certo — e o admin que entrasse em seguida
+// recebia inventário zerado, que o autosave podia gravar de volta por cima
+// do inventário de verdade. Agora: planilha sem nada salvo ainda (só o
+// cabeçalho) continua sendo "estado vazio" legítimo; mas se há conteúdo e
+// ele não é JSON válido, tenta de novo algumas vezes (pode ter sido lido
+// bem no meio de uma gravação — o doGet não usa a trava) e, se continuar
+// ilegível, lança ESTADO_ILEGIVEL em vez de fingir que está vazio.
 function readState() {
   const sh = getOrCreateSheet('AppState', ['data']);
-  const lastRow = sh.getLastRow();
   const defaults = { categorias: [], areas: [], responsaveis: [], inventario: [] };
-  if (lastRow < 2) return defaults;
-  const values = sh.getRange(2, 1, lastRow - 1, 1).getValues();
-  const combined = values.map(function (r) { return r[0]; }).join('');
-  if (!combined) return defaults;
-  try {
-    const parsed = JSON.parse(combined);
-    delete parsed.chamados;
-    return parsed;
-  } catch (e) {
-    return defaults;
+  for (let tentativa = 0; tentativa < 3; tentativa++) {
+    const lastRow = sh.getLastRow();
+    if (lastRow < 2) return defaults;
+    const values = sh.getRange(2, 1, lastRow - 1, 1).getValues();
+    const combined = values.map(function (r) { return r[0]; }).join('');
+    try {
+      const parsed = JSON.parse(combined);
+      delete parsed.chamados;
+      return parsed;
+    } catch (e) {
+      Utilities.sleep(700);
+    }
   }
+  Logger.log('AppState ilegível depois de 3 tentativas — nada foi devolvido como vazio.');
+  throw new Error('ESTADO_ILEGIVEL');
 }
 
 // Por segurança, remove "chamados" antes de gravar mesmo que alguém passe
 // por engano — chamados nunca devem ser persistidos aqui.
+//
+// O JSON é gravado em pedaços de até ~45 mil caracteres (limite de 50 mil
+// por célula do Sheets), um por linha. Dois cuidados que antes não havia:
+// (1) nenhum pedaço começa com = + - @ ou ' — o Sheets trataria "=..." como
+// fórmula (e "'..." perderia o apóstrofo), corrompendo o JSON; a coluna
+// também é formatada como texto puro. (2) grava por cima e só depois limpa
+// as linhas que sobraram, em vez de apagar tudo primeiro: se a gravação
+// falhar no meio, o conteúdo anterior não some.
+const CARACTERES_PERIGOSOS_NO_INICIO = "=+-@'";
+
 function writeState(obj) {
   const sh = getOrCreateSheet('AppState', ['data']);
   const paraGravar = Object.assign({}, obj);
   delete paraGravar.chamados;
   const json = JSON.stringify(paraGravar);
   const CHUNK = 45000;
-  const lastRow = sh.getLastRow();
-  if (lastRow >= 2) {
-    sh.getRange(2, 1, lastRow - 1, 1).clearContent();
-  }
   const chunks = [];
-  for (let i = 0; i < json.length; i += CHUNK) {
-    chunks.push([json.slice(i, i + CHUNK)]);
+  let inicio = 0;
+  while (inicio < json.length) {
+    let fim = Math.min(inicio + CHUNK, json.length);
+    // Empurra o corte pra frente enquanto o próximo pedaço fosse começar
+    // com um caractere perigoso (no máximo alguns caracteres a mais).
+    while (fim < json.length && CARACTERES_PERIGOSOS_NO_INICIO.indexOf(json.charAt(fim)) !== -1) fim++;
+    chunks.push([json.slice(inicio, fim)]);
+    inicio = fim;
   }
-  if (chunks.length === 0) chunks.push(['']);
+  const lastRowAntes = sh.getLastRow();
+  sh.getRange(2, 1, Math.max(chunks.length, 1), 1).setNumberFormat('@');
   sh.getRange(2, 1, chunks.length, 1).setValues(chunks);
+  const primeiraSobrando = chunks.length + 2;
+  if (lastRowAntes >= primeiraSobrando) {
+    sh.getRange(primeiraSobrando, 1, lastRowAntes - primeiraSobrando + 1, 1).clearContent();
+  }
 }
 
 // ---------- Versão do estado (controle de concorrência entre admins) ----------
@@ -881,7 +910,26 @@ function filtrarEstadoPorPermissao(novoEstado, admin) {
 // não era usado (sem login, senha errada, ou pra montar a lista de admins
 // que já tinha sido lida). Agora só lê a planilha quando o valor é
 // realmente necessário pra montar a resposta.
+//
+// ESTADO_ILEGIVEL (ver readState) vira uma resposta de erro normal — a tela
+// mostra "tente de novo" em vez de abrir com inventário vazio.
 function doGet(e) {
+  try {
+    return doGetInterno_(e);
+  } catch (err) {
+    if (err.message !== 'ESTADO_ILEGIVEL') throw err;
+    const payload = { ok: false, error: 'Não foi possível ler o inventário agora. Tente de novo em alguns segundos; se continuar, avise o suporte de TI.' };
+    const callback = (e && e.parameter && e.parameter.callback) || '';
+    if (callback) {
+      return ContentService
+        .createTextOutput(callback + '(' + JSON.stringify(payload) + ');')
+        .setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    return jsonOut(payload);
+  }
+}
+
+function doGetInterno_(e) {
   const p = (e && e.parameter) || {};
   const callback = p.callback || '';
   let payload;
@@ -1138,7 +1186,14 @@ function doPostComTrava(e) {
     if (body.baseVersao !== undefined && String(body.baseVersao) !== versaoEstadoAtual_()) {
       return jsonOut({ ok: false, error: 'CONFLITO_VERSAO' });
     }
-    const estadoFiltrado = filtrarEstadoPorPermissao(body.state, admin);
+    let estadoFiltrado;
+    try {
+      estadoFiltrado = filtrarEstadoPorPermissao(body.state, admin);
+    } catch (err) {
+      // Estado atual ilegível (ver readState): não grava nada por cima.
+      if (err.message === 'ESTADO_ILEGIVEL') return jsonOut({ ok: false, error: 'ESTADO_ILEGIVEL' });
+      throw err;
+    }
     writeState(estadoFiltrado);
     const novaVersao = String(body.novaVersao || '');
     props.setProperty(VERSAO_ESTADO_PROP, /^[A-Za-z0-9-]{1,40}$/.test(novaVersao) ? novaVersao : Utilities.getUuid());
