@@ -357,6 +357,27 @@ function sairDoFirebase_() {
   } catch (e) {}
 }
 
+// Depois de mandar um chamado/mensagem, a tela acrescenta o item na lista
+// local sem esperar o backend (o POST é no-cors, não tem resposta pra ler).
+// Com a leitura ao vivo ligada, a versão do servidor costuma chegar pelo
+// Firestore ANTES do fetch terminar — e aí acrescentar de novo duplicava o
+// item na tela. Estes dois só acrescentam se ele ainda não estiver lá.
+// Mensagem é comparada por autor + texto + horário próximo (a do servidor
+// tem a data do servidor, não a do navegador, então não dá pra comparar
+// o objeto inteiro); 5 min de folga cobre relógio de PC desacertado.
+function comChamadoSemDuplicar_(chamados, novo) {
+  const lista = chamados || [];
+  return lista.some((c) => c.id === novo.id) ? lista : [...lista, novo];
+}
+
+function comMensagemSemDuplicar_(mensagens, nova) {
+  const lista = mensagens || [];
+  const jaChegou = lista.some(
+    (m) => m.autor === nova.autor && m.texto === nova.texto && Math.abs(new Date(m.data) - new Date(nova.data)) < 5 * 60 * 1000
+  );
+  return jaChegou ? lista : [...lista, nova];
+}
+
 // Retorna uma função pra cancelar a assinatura (chamar no cleanup do
 // useEffect / no logout). onChange recebe a lista inteira de chamados toda
 // vez que algo muda no Firestore (documento novo, editado ou removido).
@@ -4072,7 +4093,7 @@ function Chamados({ state, setState, unidadeAtiva, secret, podeAbrirChamados = t
     try {
       const res = await backendPost("novoChamado", { chamado, secret });
       if (!res.ok) throw new Error(res.error || "Erro ao abrir chamado");
-      setState((prev) => ({ ...prev, chamados: [...(prev.chamados || []), chamado] }));
+      setState((prev) => ({ ...prev, chamados: comChamadoSemDuplicar_(prev.chamados, chamado) }));
       setNovoMode(false);
       setForm(novoChamadoForm(unidadeAtiva));
       setSelectedId(chamado.id);
@@ -4094,7 +4115,7 @@ function Chamados({ state, setState, unidadeAtiva, secret, podeAbrirChamados = t
       if (!res.ok) throw new Error(res.error || "Erro ao enviar mensagem");
       setState((prev) => ({
         ...prev,
-        chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: [...c.mensagens, mensagem] } : c)),
+        chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: comMensagemSemDuplicar_(c.mensagens, mensagem) } : c)),
       }));
       setReplyText("");
     } catch (e) {
@@ -4905,7 +4926,7 @@ function ChamadosSolicitante({ state, setState, userAuth, onLogout, onFotoChange
     try {
       const res = await backendPost("novoChamado", { chamado, userNome: userAuth.nome, userSenha: userAuth.senha });
       if (!res.ok) throw new Error(res.error || "Erro ao abrir chamado");
-      setState((prev) => ({ ...prev, chamados: [...(prev.chamados || []), chamado] }));
+      setState((prev) => ({ ...prev, chamados: comChamadoSemDuplicar_(prev.chamados, chamado) }));
       setNovoMode(false);
       setForm(novoChamadoSolicitanteForm());
       setSelectedId(chamado.id);
@@ -4926,7 +4947,7 @@ function ChamadosSolicitante({ state, setState, userAuth, onLogout, onFotoChange
       if (!res.ok) throw new Error(res.error || "Erro ao enviar mensagem");
       setState((prev) => ({
         ...prev,
-        chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: [...c.mensagens, mensagem] } : c)),
+        chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: comMensagemSemDuplicar_(c.mensagens, mensagem) } : c)),
       }));
       setReplyText("");
     } catch (e) {
@@ -5974,7 +5995,7 @@ function ChamadosDock({ state, setState, abertoId, onAbrirChange, secret, podeRe
       if (!res.ok) throw new Error(res.error || "Erro ao enviar mensagem");
       setState((prev) => ({
         ...prev,
-        chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: [...c.mensagens, mensagem] } : c)),
+        chamados: prev.chamados.map((c) => (c.id === selecionado.id ? { ...c, mensagens: comMensagemSemDuplicar_(c.mensagens, mensagem) } : c)),
       }));
       setTexto("");
     } catch (e) {
