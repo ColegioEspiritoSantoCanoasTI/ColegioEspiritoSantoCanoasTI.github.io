@@ -83,6 +83,49 @@ function findAdminBySecret(secret, adminsList) {
 // momento a aba fica vazia.
 const LIMITE_CARACTERES_CELULA_SEGURO = 45000;
 
+// ---------- Proteção contra fórmulas na planilha ----------
+
+// Texto gravado numa célula comum que começa com "=" vira FÓRMULA no Sheets.
+// Como o cadastro é público, alguém podia se cadastrar com nome "=B2" (e a
+// célula passava a mostrar a senha de outra pessoa) ou "=IMPORTDATA(...)"
+// (tentando mandar dados da planilha pra fora). Duas camadas: (1) as colunas
+// de texto de Admins/Solicitantes ficam formatadas como texto puro, o que
+// também preserva senhas como "0123" (antes viravam o número 123); (2) o
+// cadastro público recusa nome/email/senha começando com = + - @.
+// Só as colunas de TEXTO — as de verdadeiro/falso (editar, aprovado...)
+// não podem virar texto, senão "FALSE" deixaria de ser o booleano false.
+const COLUNAS_TEXTO_ADMINS = 3;       // nome, senha, permissoes
+const COLUNAS_TEXTO_SOLICITANTES = 5; // nome, senha, tipo, foto, email
+
+function garantirColunasTexto_(sh, numColunas) {
+  sh.getRange(1, 1, sh.getMaxRows(), numColunas).setNumberFormat('@');
+}
+
+function comecaComCaracterDeFormula_(valor) {
+  return /^[=+\-@]/.test(String(valor || ''));
+}
+
+// Execução manual (pelo editor do Apps Script): lista no log qualquer
+// célula de Admins/Solicitantes que tenha virado fórmula — pra conferir se
+// alguém já tinha explorado isso antes da correção.
+function verificarFormulasNaPlanilha() {
+  let achou = 0;
+  ['Admins', 'Solicitantes'].forEach(function (nome) {
+    const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(nome);
+    if (!sh) return;
+    const formulas = sh.getDataRange().getFormulas();
+    formulas.forEach(function (linha, i) {
+      linha.forEach(function (f, j) {
+        if (f) {
+          achou++;
+          Logger.log('Fórmula em ' + nome + ' linha ' + (i + 1) + ', coluna ' + (j + 1) + ': ' + f);
+        }
+      });
+    });
+  });
+  Logger.log(achou ? achou + ' fórmula(s) encontrada(s) — confira as linhas acima.' : 'Nenhuma fórmula encontrada em Admins/Solicitantes.');
+}
+
 function substituirLinhasComSeguranca_(sh, rows, numColunas) {
   rows.forEach(function (row) {
     row.forEach(function (valor) {
@@ -113,6 +156,7 @@ function saveAdmins(list) {
     const responder = a.podeResponderChamados === undefined ? !!a.editar : !!a.podeResponderChamados;
     return [a.nome, a.senha, a.permissoes, !!a.editar, abrir, responder, !!a.responderSoProprios];
   });
+  garantirColunasTexto_(sh, COLUNAS_TEXTO_ADMINS);
   substituirLinhasComSeguranca_(sh, rows, 7);
 }
 
@@ -189,6 +233,7 @@ function saveSolicitantes(list) {
       !!s.autorizadoAbreChamados,
     ];
   });
+  garantirColunasTexto_(sh, COLUNAS_TEXTO_SOLICITANTES);
   substituirLinhasComSeguranca_(sh, rows, 7);
 }
 
@@ -343,6 +388,10 @@ function processarCadastroSolicitante_(nome, email, senha) {
   if (nome.length > 100 || email.length > 200 || senha.length > 200) {
     return { ok: false, error: 'Nome, email ou senha longos demais.' };
   }
+  // Ver "Proteção contra fórmulas na planilha".
+  if (comecaComCaracterDeFormula_(nome) || comecaComCaracterDeFormula_(email) || comecaComCaracterDeFormula_(senha)) {
+    return { ok: false, error: 'Nome, email e senha não podem começar com = + - ou @.' };
+  }
   if (!validarEmail_(email)) {
     return { ok: false, error: 'Informe um email válido.' };
   }
@@ -357,8 +406,9 @@ function processarCadastroSolicitante_(nome, email, senha) {
   }
   // Acrescenta só a linha nova (mesma ordem de colunas de saveSolicitantes)
   // em vez de regravar a aba inteira a cada cadastro público.
-  getOrCreateSheet('Solicitantes', ['nome', 'senha', 'tipo', 'foto', 'email', 'aprovado', 'autorizadoAbreChamados'])
-    .appendRow([nome, senha, 'solicitante', '', email, false, false]);
+  const sh = getOrCreateSheet('Solicitantes', ['nome', 'senha', 'tipo', 'foto', 'email', 'aprovado', 'autorizadoAbreChamados']);
+  garantirColunasTexto_(sh, COLUNAS_TEXTO_SOLICITANTES);
+  sh.appendRow([nome, senha, 'solicitante', '', email, false, false]);
   return { ok: true };
 }
 
@@ -1407,4 +1457,65 @@ function doPostComTrava(e) {
   }
 
   return jsonOut({ ok: false, error: 'Ação não autorizada' });
+}
+
+// ---------- Backup automático diário ----------
+
+// Até aqui a única "cópia de segurança" era o histórico de versões do
+// próprio Google Sheets — que ajuda, mas é difícil de usar numa emergência
+// e não protege se a planilha for apagada. fazerBackupDiario copia TODAS as
+// abas (só os dados, sem o código do Apps Script) pra uma planilha nova
+// dentro da pasta "Backups - Inventário de TI" no Drive de quem é dono do
+// script, e manda pra lixeira os backups com mais de BACKUP_DIAS_GUARDADOS
+// dias. Os backups têm as mesmas informações da planilha original,
+// inclusive senhas — a pasta é privada por padrão; não compartilhe.
+//
+// Pra ligar: no editor do Apps Script, escolha a função instalarBackupDiario
+// no menu de cima e clique em Executar (uma vez só). O Google vai pedir
+// permissão pro Drive — é pra criar a pasta e os arquivos de backup.
+const BACKUP_PASTA_NOME = 'Backups - Inventário de TI';
+const BACKUP_PREFIXO_ARQUIVO = 'Backup Inventário TI ';
+const BACKUP_DIAS_GUARDADOS = 30;
+
+function instalarBackupDiario() {
+  // Remove gatilhos antigos da mesma função, pra não duplicar se rodar de novo.
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'fazerBackupDiario') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('fazerBackupDiario').timeBased().everyDays(1).atHour(3).create();
+  fazerBackupDiario(); // já faz o primeiro agora, pra conferir que funciona
+  Logger.log('Backup diário instalado (todo dia por volta das 3h). Primeiro backup feito na pasta "' + BACKUP_PASTA_NOME + '".');
+}
+
+function pastaDeBackup_() {
+  const pastas = DriveApp.getFoldersByName(BACKUP_PASTA_NOME);
+  return pastas.hasNext() ? pastas.next() : DriveApp.createFolder(BACKUP_PASTA_NOME);
+}
+
+function fazerBackupDiario() {
+  const origem = SpreadsheetApp.getActiveSpreadsheet();
+  const carimbo = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
+  const copia = SpreadsheetApp.create(BACKUP_PREFIXO_ARQUIVO + carimbo);
+  // A planilha nova já nasce com uma aba vazia ("Página1"/"Sheet1"); nome
+  // temporário único pra não colidir com uma aba de mesmo nome da original.
+  const abaVaziaInicial = copia.getSheets()[0].setName('__backup_temp_' + Date.now());
+  origem.getSheets().forEach(function (aba) {
+    aba.copyTo(copia).setName(aba.getName());
+  });
+  copia.deleteSheet(abaVaziaInicial);
+  const pasta = pastaDeBackup_();
+  DriveApp.getFileById(copia.getId()).moveTo(pasta);
+
+  // Limpeza: só mexe em arquivos desta pasta com o nome de backup.
+  const limite = new Date(Date.now() - BACKUP_DIAS_GUARDADOS * 24 * 60 * 60 * 1000);
+  const arquivos = pasta.getFiles();
+  let removidos = 0;
+  while (arquivos.hasNext()) {
+    const arquivo = arquivos.next();
+    if (arquivo.getName().indexOf(BACKUP_PREFIXO_ARQUIVO) === 0 && arquivo.getDateCreated() < limite) {
+      arquivo.setTrashed(true);
+      removidos++;
+    }
+  }
+  Logger.log('Backup criado: ' + copia.getName() + (removidos ? ' — ' + removidos + ' backup(s) antigo(s) enviado(s) pra lixeira.' : ''));
 }
